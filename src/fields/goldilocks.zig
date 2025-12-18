@@ -93,9 +93,9 @@ const Goldilocks = struct {
         return @bitCast(std.mem.nativeToLittle(u64, self.value));
     }
 
-    pub fn fromBytes(bytes: [ENCODED_SIZE]u8) ?Goldilocks {
+    pub fn fromBytes(bytes: [ENCODED_SIZE]u8) field.FieldError!Goldilocks {
         const value = std.mem.littleToNative(u64, @bitCast(bytes));
-        if (value >= MODULUS) return null;
+        if (value >= MODULUS) return field.FieldError.InvalidValue;
         return .{ .value = value };
     }
 
@@ -207,6 +207,6 @@ test "reduction edge cases" {
 test "serialization roundtrip" {
     const original = Goldilocks.fromU64(0xDEADBEEFCAFEBABE % Goldilocks.MODULUS);
     const bytes = original.toBytes();
-    const recovered = Goldilocks.fromBytes(bytes).?;
+    const recovered = try Goldilocks.fromBytes(bytes);
     try std.testing.expect(original.eql(recovered));
 }
