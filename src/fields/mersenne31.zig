@@ -159,12 +159,233 @@ pub const Mersenne31 = struct {
     }
 };
 
-// Interface check
+// Interface and generic tests
 comptime {
     field.verify(Mersenne31);
+    _ = field.tests(Mersenne31);
 }
 
-test "additive identity" {
+// ============ Mersenne31-Specific Tests ============ //
+
+// ============ Reduction Edge Case Tests ============ //
+
+test "addition near modulus" {
+    const p = Mersenne31.MODULUS;
+    const pm1 = Mersenne31{ .value = p - 1 };
+    const pm2 = Mersenne31{ .value = p - 2 };
+
+    // (p-1) + 1 = 0
+    try std.testing.expect(pm1.add(Mersenne31.one).isZero());
+
+    // (p-1) + (p-1) = p-2  (since -1 + -1 = -2)
+    try std.testing.expect(pm1.add(pm1).eql(pm2));
+
+    // (p-2) + 2 = 0
+    const two = Mersenne31.fromU32(2);
+    try std.testing.expect(pm2.add(two).isZero());
+}
+
+test "multiplication near modulus" {
+    const p = Mersenne31.MODULUS;
+    const pm1 = Mersenne31{ .value = p - 1 }; // -1
+
+    // (-1) * (-1) = 1
+    try std.testing.expect(pm1.mul(pm1).eql(Mersenne31.one));
+
+    // 2 * (-1) = -2 = p-2
+    const two = Mersenne31.fromU32(2);
+    const pm2 = Mersenne31{ .value = p - 2 };
+    try std.testing.expect(two.mul(pm1).eql(pm2));
+
+    // 0 * (p-1) = 0
+    try std.testing.expect(Mersenne31.zero.mul(pm1).isZero());
+}
+
+test "reduction half modulus" {
+    const p = Mersenne31.MODULUS;
+    const half_p = Mersenne31.fromU64(p / 2);
+    const sum = half_p.add(half_p).add(half_p);
+    const expected = Mersenne31.fromU64(@as(u64, 3) * (p / 2) % p);
+    try std.testing.expect(sum.eql(expected));
+}
+
+// ============ Subtraction Tests ============ //
+
+test "subtraction boundary values" {
+    const p = Mersenne31.MODULUS;
+    const vals = [_]u32{ 0, 1, 2, p - 2, p - 1 };
+
+    for (vals) |a_raw| {
+        for (vals) |b_raw| {
+            const a = Mersenne31{ .value = a_raw };
+            const b = Mersenne31{ .value = b_raw };
+
+            const got = a.sub(b);
+
+            // Reference: (a + p - b) mod p
+            const expected_val: u32 = @intCast((@as(u64, a_raw) + p - b_raw) % p);
+            try std.testing.expectEqual(expected_val, got.value);
+        }
+    }
+}
+
+test "subtraction specific cases" {
+    const p = Mersenne31.MODULUS;
+
+    // 0 - 1 = p-1
+    try std.testing.expectEqual(p - 1, Mersenne31.zero.sub(Mersenne31.one).value);
+
+    // 0 - (p-1) = 1
+    const pm1 = Mersenne31{ .value = p - 1 };
+    try std.testing.expectEqual(@as(u32, 1), Mersenne31.zero.sub(pm1).value);
+
+    // 1 - 2 = p-1
+    const two = Mersenne31.fromU32(2);
+    try std.testing.expectEqual(p - 1, Mersenne31.one.sub(two).value);
+
+    // (p-1) - (p-1) = 0
+    try std.testing.expect(pm1.sub(pm1).isZero());
+}
+
+// ============ Constructor Tests ============ //
+
+test "fromU32 edge cases" {
+    const p = Mersenne31.MODULUS;
+
+    try std.testing.expectEqual(@as(u32, 0), Mersenne31.fromU32(0).value);
+    try std.testing.expectEqual(@as(u32, 1), Mersenne31.fromU32(1).value);
+    try std.testing.expectEqual(p - 1, Mersenne31.fromU32(p - 1).value);
+    try std.testing.expectEqual(@as(u32, 0), Mersenne31.fromU32(p).value);
+    try std.testing.expectEqual(@as(u32, 1), Mersenne31.fromU32(p + 1).value);
+
+    // max u32
+    const max_u32: u32 = std.math.maxInt(u32);
+    const expected: u32 = @intCast(@as(u64, max_u32) % p);
+    try std.testing.expectEqual(expected, Mersenne31.fromU32(max_u32).value);
+}
+
+test "fromU64 edge cases" {
+    const p: u64 = Mersenne31.MODULUS;
+
+    try std.testing.expectEqual(@as(u32, 0), Mersenne31.fromU64(0).value);
+    try std.testing.expectEqual(@as(u32, 1), Mersenne31.fromU64(1).value);
+    try std.testing.expectEqual(@as(u32, p - 1), Mersenne31.fromU64(p - 1).value);
+    try std.testing.expectEqual(@as(u32, 0), Mersenne31.fromU64(p).value);
+    try std.testing.expectEqual(@as(u32, 1), Mersenne31.fromU64(p + 1).value);
+
+    // 2^31 ≡ 1 (mod p)
+    try std.testing.expectEqual(@as(u32, 1), Mersenne31.fromU64(1 << 31).value);
+
+    // 2^31 - 1 = p, which reduces to 0
+    try std.testing.expectEqual(@as(u32, 0), Mersenne31.fromU64((1 << 31) - 1).value);
+
+    // max u64
+    const max_u64: u64 = std.math.maxInt(u64);
+    const expected: u32 = @intCast(max_u64 % p);
+    try std.testing.expectEqual(expected, Mersenne31.fromU64(max_u64).value);
+
+    // Large values
+    try std.testing.expectEqual(@as(u32, @intCast(0xDEADBEEF % p)), Mersenne31.fromU64(0xDEADBEEF).value);
+    try std.testing.expectEqual(@as(u32, @intCast(0xCAFEBABEDEADBEEF % p)), Mersenne31.fromU64(0xCAFEBABEDEADBEEF).value);
+}
+
+// ============ Serialization Tests ============ //
+
+test "fromBytes rejects invalid values" {
+    // p itself should be rejected
+    const invalid_bytes: [4]u8 = @bitCast(std.mem.nativeToLittle(u32, Mersenne31.MODULUS));
+    try std.testing.expectError(field.FieldError.InvalidValue, Mersenne31.fromBytes(invalid_bytes));
+
+    // p+1 should be rejected
+    const invalid_bytes2: [4]u8 = @bitCast(std.mem.nativeToLittle(u32, Mersenne31.MODULUS + 1));
+    try std.testing.expectError(field.FieldError.InvalidValue, Mersenne31.fromBytes(invalid_bytes2));
+
+    // max u32 should be rejected
+    const invalid_bytes3: [4]u8 = @bitCast(std.mem.nativeToLittle(u32, std.math.maxInt(u32)));
+    try std.testing.expectError(field.FieldError.InvalidValue, Mersenne31.fromBytes(invalid_bytes3));
+}
+
+// ============ Batch Operation Tests ============ //
+
+test "batch ops match scalar ops" {
+    var a = [_]Mersenne31{
+        Mersenne31.fromU32(0),
+        Mersenne31.fromU32(1),
+        Mersenne31.fromU32(2),
+        Mersenne31.fromU32(1234567),
+    };
+    var b = [_]Mersenne31{
+        Mersenne31.fromU32(3),
+        Mersenne31.fromU32(Mersenne31.MODULUS - 1),
+        Mersenne31.fromU32(5),
+        Mersenne31.fromU32(7654321),
+    };
+
+    var add_dst: [4]Mersenne31 = undefined;
+    Mersenne31.addBatch(&add_dst, &a, &b);
+    for (0..4) |i| {
+        try std.testing.expect(add_dst[i].eql(a[i].add(b[i])));
+    }
+
+    var mul_dst: [4]Mersenne31 = undefined;
+    Mersenne31.mulBatch(&mul_dst, &a, &b);
+    for (0..4) |i| {
+        try std.testing.expect(mul_dst[i].eql(a[i].mul(b[i])));
+    }
+
+    var sub_dst: [4]Mersenne31 = undefined;
+    Mersenne31.subBatch(&sub_dst, &a, &b);
+    for (0..4) |i| {
+        try std.testing.expect(sub_dst[i].eql(a[i].sub(b[i])));
+    }
+
+    var mac_dst: [4]Mersenne31 = undefined;
+    Mersenne31.mulAddBatch(&mac_dst, &a, &b, &a);
+    for (0..4) |i| {
+        try std.testing.expect(mac_dst[i].eql(a[i].mul(b[i]).add(a[i])));
+    }
+}
+
+// ============ Park-Miller MINSTD Test Vectors ============ //
+
+test "Park-Miller MINSTD sequence" {
+    // Classic Park-Miller LCG: x_{n+1} = 16807 * x_n mod (2^31 - 1)
+    // These are well-known test vectors
+    const multiplier = Mersenne31.fromU32(16807);
+    var x = Mersenne31.fromU32(1);
+
+    const expected = [_]u32{
+        16807,
+        282475249,
+        1622650073,
+        984943658,
+        1144108930,
+    };
+
+    for (expected) |exp| {
+        x = x.mul(multiplier);
+        try std.testing.expectEqual(exp, x.value);
+    }
+}
+
+test "Park-Miller MINSTD 10000th iteration" {
+    // x_10000 = 1043618065 (well-known test vector)
+    const multiplier = Mersenne31.fromU32(16807);
+    var x = Mersenne31.fromU32(1);
+
+    for (0..10000) |_| {
+        x = x.mul(multiplier);
+    }
+    try std.testing.expectEqual(@as(u32, 1043618065), x.value);
+}
+
+// ============ Fermat's Little Theorem ============ //
+
+test "Fermat's little theorem" {
+    // a^(p-1) = 1 for non-zero a
     const a = Mersenne31.fromU64(12345);
-    try std.testing.expect(a.add(Mersenne31.zero).eql(a));
+    try std.testing.expect(a.pow(Mersenne31.MODULUS - 1).eql(Mersenne31.one));
+
+    const b = Mersenne31.fromU64(9999999);
+    try std.testing.expect(b.pow(Mersenne31.MODULUS - 1).eql(Mersenne31.one));
 }

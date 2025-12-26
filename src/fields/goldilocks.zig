@@ -162,48 +162,13 @@ const Goldilocks = struct {
     }
 };
 
-// Interface check
+// Interface and generic tests
 comptime {
     field.verify(Goldilocks);
+    _ = field.tests(Goldilocks);
 }
 
-// TODO review, make generic
-test "additive identity" {
-    const a = Goldilocks.fromU64(12345);
-    try std.testing.expect(a.add(Goldilocks.zero).eql(a));
-}
-
-test "multiplicative identity" {
-    const a = Goldilocks.fromU64(12345);
-    try std.testing.expect(a.mul(Goldilocks.one).eql(a));
-}
-
-test "additive inverse" {
-    const a = Goldilocks.fromU64(12345);
-    try std.testing.expect(a.add(a.neg()).isZero());
-}
-
-test "multiplicative inverse" {
-    const a = Goldilocks.fromU64(12345);
-    try std.testing.expect(a.mul(a.inv()).eql(Goldilocks.one));
-}
-
-test "commutativity" {
-    const a = Goldilocks.fromU64(111);
-    const b = Goldilocks.fromU64(222);
-    try std.testing.expect(a.add(b).eql(b.add(a)));
-    try std.testing.expect(a.mul(b).eql(b.mul(a)));
-}
-
-test "distributivity" {
-    const a = Goldilocks.fromU64(111);
-    const b = Goldilocks.fromU64(222);
-    const c = Goldilocks.fromU64(333);
-
-    const lhs = a.mul(b.add(c));
-    const rhs = a.mul(b).add(a.mul(c));
-    try std.testing.expect(lhs.eql(rhs));
-}
+// ============ Goldilocks-Specific Tests ============ //
 
 test "reduction edge cases" {
     // Near modulus
@@ -216,11 +181,4 @@ test "reduction edge cases" {
     const sum = half_p.add(half_p).add(half_p);
     // 3 * floor(p/2) mod p = floor(p/2) - 1 (since p is odd)
     try std.testing.expect(sum.eql(half_p.sub(Goldilocks.one)));
-}
-
-test "serialization roundtrip" {
-    const original = Goldilocks.fromU64(0xDEADBEEFCAFEBABE % Goldilocks.MODULUS);
-    const bytes = original.toBytes();
-    const recovered = try Goldilocks.fromBytes(bytes);
-    try std.testing.expect(original.eql(recovered));
 }
