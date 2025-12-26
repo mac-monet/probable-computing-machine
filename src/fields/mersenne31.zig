@@ -1,41 +1,41 @@
 const std = @import("std");
 const field = @import("field.zig");
 
+/// Mersenne-31: p = 2^31 - 1
 pub const Mersenne31 = struct {
     value: u32,
 
-    pub const MODULUS: u32 = 0x7FFFFFFF; // 2^31 - 1
+    // p = 2^31 - 1
+    pub const MODULUS: u32 = 0x7FFFFFFF;
     pub const ENCODED_SIZE: usize = 4;
-
-    const MODULUS_U64: u64 = MODULUS;
 
     pub const zero: Mersenne31 = .{ .value = 0 };
     pub const one: Mersenne31 = .{ .value = 1 };
 
-    // ============ Core Arithmetic ============
+    // ============ Core Arithmetic ============ //
 
     pub fn add(a: Mersenne31, b: Mersenne31) Mersenne31 {
-        // a, b < 2^31, so sum < 2^32, fits in u32 with possible wrap
+        // a + b < 2^32, fits in u32 with potential wrap
         var sum: u32 = a.value +% b.value;
 
-        // Mersenne reduction: x mod (2^31 - 1) = (x & MODULUS) + (x >> 31)
-        sum = (sum & MODULUS) + (sum >> 31);
+        // Mersenne reduction: x mod (2^31 - 1) = (x & mask) + (x >> 31)
+        // Because 2^31 ≡ 1 (mod p)
+        sum = (sum & MODULUS) +% (sum >> 31);
 
-        // One more reduction might be needed
-        if (sum >= MODULUS) sum -= MODULUS;
+        // At most one more reduction
+        if (sum >= MODULUS) sum -%= MODULUS;
 
         return .{ .value = sum };
     }
 
     pub fn sub(a: Mersenne31, b: Mersenne31) Mersenne31 {
-        if (a.value >= b.value) {
-            return .{ .value = a.value - b.value };
-        } else {
-            return .{ .value = MODULUS - (b.value - a.value) };
-        }
+        const diff = a.value +% (MODULUS - b.value);
+        // diff is in [0, 2*MODULUS), reduce once
+        return .{ .value = if (diff >= MODULUS) diff - MODULUS else diff };
     }
 
     pub fn mul(a: Mersenne31, b: Mersenne31) Mersenne31 {
+        // Product fits in u64
         const wide: u64 = @as(u64, a.value) * @as(u64, b.value);
         return reduce64(wide);
     }
@@ -44,40 +44,59 @@ pub const Mersenne31 = struct {
         return if (a.value == 0) a else .{ .value = MODULUS - a.value };
     }
 
-    // ============ Derived Arithmetic ============
+    // ============ Batch Arithmetic ============ //
+    // TODO SIMD optimize later
 
-    pub fn square(a: Mersenne31) Mersenne31 {
-        return a.mul(a);
+    pub fn addBatch(dst: []Mersenne31, a: []Mersenne31, b: []Mersenne31) void {
+        std.debug.assert(dst.len == a.len and a.len == b.len);
+        for (dst, a, b) |*d, aa, bb| {
+            d.* = add(aa, bb);
+        }
     }
 
-    pub fn double(a: Mersenne31) Mersenne31 {
-        return a.add(a);
+    pub fn mulBatch(dst: []Mersenne31, a: []const Mersenne31, b: []const Mersenne31) void {
+        std.debug.assert(dst.len == a.len and a.len == b.len);
+        for (dst, a, b) |*d, aa, bb| {
+            d.* = mul(aa, bb);
+        }
     }
+
+    pub fn subBatch(dst: []Mersenne31, a: []const Mersenne31, b: []const Mersenne31) void {
+        std.debug.assert(dst.len == a.len and a.len == b.len);
+        for (dst, a, b) |*d, aa, bb| {
+            d.* = sub(aa, bb);
+        }
+    }
+
+    // Fused multiply-add: dst[i] = a[i] * b[i] + c[i]
+    pub fn mulAddBatch(dst: []Mersenne31, a: []const Mersenne31, b: []const Mersenne31, c: []const Mersenne31) void {
+        std.debug.assert(dst.len == a.len and a.len == b.len and b.len == c.len);
+        for (dst, a, b, c) |*d, aa, bb, cc| {
+            d.* = mul(aa, bb).add(cc);
+        }
+    }
+
+    // ============ Derived Arithmetic ============ //
+
+    pub const square = field.defaults(Mersenne31).square;
+    pub const double = field.defaults(Mersenne31).double;
+    pub const pow = field.defaults(Mersenne31).pow;
 
     pub fn inv(a: Mersenne31) Mersenne31 {
         std.debug.assert(!a.isZero());
+        // a^(-1) = a^(p-2) by Fermat's little theorem
         return a.pow(MODULUS - 2);
     }
 
-    pub fn pow(base: Mersenne31, exp: u32) Mersenne31 {
-        if (exp == 0) return one;
-
-        var result = one;
-        var b = base;
-        var e = exp;
-
-        while (e > 0) {
-            if (e & 1 == 1) result = result.mul(b);
-            b = b.square();
-            e >>= 1;
-        }
-        return result;
-    }
-
-    // ============ Serialization ============
+    // ============ Serialization ============ //
 
     pub fn toBytes(self: Mersenne31) [ENCODED_SIZE]u8 {
-        return @bitCast(std.mem.nativeToLittle(u32, self.value));
+        // Normalize first in case greater than modulus
+        const normalized = if (self.value >= MODULUS)
+            self.value - MODULUS
+        else
+            self.value;
+        return @bitCast(std.mem.nativeToLittle(u32, normalized));
     }
 
     pub fn fromBytes(bytes: [ENCODED_SIZE]u8) field.FieldError!Mersenne31 {
@@ -86,7 +105,7 @@ pub const Mersenne31 = struct {
         return .{ .value = value };
     }
 
-    // ============ Comparison ============
+    // ============ Comparison ============ //
 
     pub fn eql(a: Mersenne31, b: Mersenne31) bool {
         return a.value == b.value;
@@ -96,45 +115,47 @@ pub const Mersenne31 = struct {
         return a.value == 0;
     }
 
-    // ============ Construction ============
+    // ============ Construction ============ //
 
     pub fn fromU64(x: u64) Mersenne31 {
-        const reduced = reduce64(x);
-        return reduced;
+        return reduce64(x);
     }
 
     pub fn fromU32(x: u32) Mersenne31 {
-        return if (x >= MODULUS) .{ .value = x - MODULUS } else .{ .value = x };
+        var v = x;
+        v = (v & MODULUS) +% (v >> 31);
+        if (v >= MODULUS) v -%= MODULUS;
+        return .{ .value = v };
     }
 
     pub fn random(rng: std.Random) Mersenne31 {
+        // Sample uniformly from [0, p)
         while (true) {
-            const candidate = rng.int(u32) & MODULUS; // Mask to 31 bits
+            const candidate = rng.int(u32) >> 1; // 31 bits
             if (candidate < MODULUS) return .{ .value = candidate };
         }
     }
 
-    // ============ Internal ============
+    // ============ Internal ============ //
 
     fn reduce64(x: u64) Mersenne31 {
         // Reduce x mod (2^31 - 1)
-        // x = x_lo + x_hi * 2^31
-        // 2^31 ≡ 1 (mod 2^31 - 1)
-        // So x ≡ x_lo + x_hi (mod p)
+        // Key: 2^31 ≡ 1 (mod p)
+        // So: x = lo + hi * 2^31 ≡ lo + hi (mod p)
 
-        var lo: u32 = @truncate(x & MODULUS_U64);
-        var hi: u32 = @truncate(x >> 31);
+        // First reduction: 64 bits → ~32 bits
+        const lo: u64 = x & MODULUS;
+        const hi: u64 = x >> 31;
 
-        // Could need multiple folds for large x
-        while (hi > 0) {
-            const sum = @as(u64, lo) + @as(u64, hi);
-            lo = @truncate(sum & MODULUS_U64);
-            hi = @truncate(sum >> 31);
-        }
+        var sum = lo +% hi;
 
-        if (lo >= MODULUS) lo -= MODULUS;
+        // Second reduction: ~32 bits → 31 bits
+        sum = (sum & MODULUS) +% (sum >> 31);
 
-        return .{ .value = lo };
+        // Final check
+        if (sum >= MODULUS) sum -%= MODULUS;
+
+        return .{ .value = @truncate(sum) };
     }
 };
 

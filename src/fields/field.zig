@@ -1,6 +1,6 @@
 const std = @import("std");
 
-// Finite Field interface
+// Finite Field interface. Loosely follows std.crypto.ff.
 
 /// Common error type for field operations
 pub const FieldError = error{
@@ -10,34 +10,41 @@ pub const FieldError = error{
 /// Documents the required field interface.
 /// Use: `comptime { verify(MyField); }` at end of implementation file.
 pub fn verify(comptime F: type) void {
-    const err = "Field '" ++ @typeName(F) ++ "' missing required ";
-
     // Type info
-    if (!@hasDecl(F, "MODULUS")) @compileError(err ++ "MODULUS");
-    if (!@hasDecl(F, "ENCODED_SIZE")) @compileError(err ++ "ENCODED_SIZE");
+    _ = F.MODULUS;
+    _ = F.ENCODED_SIZE;
 
     // Constants
-    if (!@hasDecl(F, "zero")) @compileError(err ++ "zero");
-    if (!@hasDecl(F, "one")) @compileError(err ++ "one");
+    _ = F.zero;
+    _ = F.one;
 
     // Core arithmetic
-    if (!@hasDecl(F, "add")) @compileError(err ++ "add");
-    if (!@hasDecl(F, "sub")) @compileError(err ++ "sub");
-    if (!@hasDecl(F, "mul")) @compileError(err ++ "mul");
-    if (!@hasDecl(F, "neg")) @compileError(err ++ "neg");
+    _ = @as(fn (F, F) F, F.add);
+    _ = @as(fn (F, F) F, F.sub);
+    _ = @as(fn (F, F) F, F.mul);
+    _ = @as(fn (F) F, F.neg);
+    _ = @as(fn ([]F, []F, []F) void, F.addBatch);
+    _ = @as(fn ([]F, []F, []F) void, F.mulBatch);
+    _ = @as(fn ([]F, []F, []F) void, F.subBatch);
+    _ = @as(fn ([]F, []F, []F, []F) void, F.mulAddBatch);
 
     // Extended arithmetic
-    if (!@hasDecl(F, "square")) @compileError(err ++ "square");
-    if (!@hasDecl(F, "inv")) @compileError(err ++ "inv");
+    _ = @as(fn (F) F, F.square);
+    _ = @as(fn (F) F, F.inv);
+
+    // Random sampling
+    _ = @as(fn (std.Random) F, F.random);
 
     // Comparison
-    if (!@hasDecl(F, "eql")) @compileError(err ++ "eql");
-    if (!@hasDecl(F, "isZero")) @compileError(err ++ "isZero");
+    _ = @as(fn (F, F) bool, F.eql);
+    _ = @as(fn (F) bool, F.isZero);
 
     // Serialization
-    if (!@hasDecl(F, "toBytes")) @compileError(err ++ "toBytes");
-    if (!@hasDecl(F, "fromBytes")) @compileError(err ++ "fromBytes");
-    if (!@hasDecl(F, "fromU64")) @compileError(err ++ "fromU64");
+    _ = @as(fn (F) [F.ENCODED_SIZE]u8, F.toBytes);
+    _ = @as(fn ([F.ENCODED_SIZE]u8) error{InvalidValue}!F, F.fromBytes);
+    // TODO fromBytesBatch, toBytesBatch, fromBytesUnchecked (for scribe streaming trusted data)
+
+    // TODO from/to U64, from/to U32? not sure
 }
 
 /// Provides default implementations for derived operations.
@@ -61,7 +68,7 @@ pub fn defaults(comptime Self: type) type {
 
             while (e > 0) {
                 if (e & 1 == 1) result = result.mul(b);
-                b = b.mul(b);
+                b = b.square();
                 e >>= 1;
             }
             return result;

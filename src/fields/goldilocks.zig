@@ -46,6 +46,20 @@ const Goldilocks = struct {
         return reduce128(wide);
     }
 
+    // TODO impl batch functions
+    pub fn addBatch(_: []Goldilocks, _: []const Goldilocks, _: []const Goldilocks) void {
+        @panic("TODO");
+    }
+    pub fn mulBatch(_: []Goldilocks, _: []const Goldilocks, _: []const Goldilocks) void {
+        @panic("TODO");
+    }
+    pub fn subBatch(_: []Goldilocks, _: []const Goldilocks, _: []const Goldilocks) void {
+        @panic("TODO");
+    }
+    pub fn mulAddBatch(_: []Goldilocks, _: []const Goldilocks, _: []const Goldilocks, _: []const Goldilocks) void {
+        @panic("TODO");
+    }
+
     pub fn neg(a: Goldilocks) Goldilocks {
         return if (a.value == 0) a else .{ .value = MODULUS - a.value };
     }
