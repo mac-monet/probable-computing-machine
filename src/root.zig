@@ -18,4 +18,5 @@ test {
     // Import modules to include their tests
     _ = @import("fields/goldilocks.zig");
     _ = @import("fields/mersenne31.zig");
+    _ = @import("poly/multilinear.zig");
 }
