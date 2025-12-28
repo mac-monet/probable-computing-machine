@@ -1,7 +1,7 @@
 const std = @import("std");
 const field = @import("field.zig");
 
-const Goldilocks = struct {
+pub const Goldilocks = struct {
     value: u64,
 
     // Prime modulus p = 2^64 - 2^32 + 1
