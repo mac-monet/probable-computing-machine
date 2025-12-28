@@ -22,16 +22,16 @@ pub const Mersenne31 = struct {
         // Because 2^31 ≡ 1 (mod p)
         sum = (sum & MODULUS) +% (sum >> 31);
 
-        // At most one more reduction
-        if (sum >= MODULUS) sum -%= MODULUS;
+        // Branchless final reduction: subtract MODULUS if sum >= MODULUS
+        sum -%= @as(u32, @intFromBool(sum >= MODULUS)) *% MODULUS;
 
         return .{ .value = sum };
     }
 
     pub fn sub(a: Mersenne31, b: Mersenne31) Mersenne31 {
         const diff = a.value +% (MODULUS - b.value);
-        // diff is in [0, 2*MODULUS), reduce once
-        return .{ .value = if (diff >= MODULUS) diff - MODULUS else diff };
+        // Branchless: diff is in [0, 2*MODULUS), reduce once
+        return .{ .value = diff -% @as(u32, @intFromBool(diff >= MODULUS)) *% MODULUS };
     }
 
     pub fn mul(a: Mersenne31, b: Mersenne31) Mersenne31 {
@@ -88,6 +88,30 @@ pub const Mersenne31 = struct {
             acc +%= v.value;
         }
         return reduce64(acc);
+    }
+
+    /// Sum N slices in a single pass with N independent accumulators.
+    /// All slices must have the same length. Comptime N enables full unrolling
+    /// and register allocation for accumulators - SIMD friendly.
+    pub fn sumSlices(comptime N: usize, slices: [N][]const Mersenne31) [N]Mersenne31 {
+        const len = slices[0].len;
+        comptime var i = 1;
+        inline while (i < N) : (i += 1) {
+            std.debug.assert(slices[i].len == len);
+        }
+
+        var accs: [N]u64 = .{0} ** N;
+        for (0..len) |idx| {
+            inline for (0..N) |s| {
+                accs[s] +%= slices[s][idx].value;
+            }
+        }
+
+        var results: [N]Mersenne31 = undefined;
+        inline for (0..N) |s| {
+            results[s] = reduce64(accs[s]);
+        }
+        return results;
     }
 
     /// Compute dot product: sum(a[i] * b[i]) with delayed reduction.
@@ -167,7 +191,8 @@ pub const Mersenne31 = struct {
     pub fn fromU32(x: u32) Mersenne31 {
         var v = x;
         v = (v & MODULUS) +% (v >> 31);
-        if (v >= MODULUS) v -%= MODULUS;
+        // Branchless final reduction
+        v -%= @as(u32, @intFromBool(v >= MODULUS)) *% MODULUS;
         return .{ .value = v };
     }
 
@@ -197,8 +222,8 @@ pub const Mersenne31 = struct {
         // Second reduction: ~32 bits → 31 bits
         sum = (sum & MODULUS) +% (sum >> 31);
 
-        // Final check
-        if (sum >= MODULUS) sum -%= MODULUS;
+        // Branchless final reduction
+        sum -%= @as(u64, @intFromBool(sum >= MODULUS)) *% MODULUS;
 
         return .{ .value = @truncate(sum) };
     }

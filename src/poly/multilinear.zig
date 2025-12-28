@@ -19,7 +19,7 @@ pub fn sum(comptime F: type, evals: []const F) F {
 pub fn sumHalves(comptime F: type, evals: []const F) [2]F {
     std.debug.assert(evals.len >= 2);
     const half = evals.len / 2;
-    return .{ F.sumSlice(evals[0..half]), F.sumSlice(evals[half..]) };
+    return F.sumSlices(2, .{ evals[0..half], evals[half..] });
 }
 
 /// Full evaluation at a point via successive binds.
