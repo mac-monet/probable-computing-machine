@@ -14,7 +14,6 @@ pub const Mersenne31 = struct {
 
     // ============ Core Arithmetic ============ //
 
-    // TODO this is slow because it reduces for every add op.
     pub fn add(a: Mersenne31, b: Mersenne31) Mersenne31 {
         // a + b < 2^32, fits in u32 with potential wrap
         var sum: u32 = a.value +% b.value;
@@ -111,15 +110,11 @@ pub const Mersenne31 = struct {
         const r_val: u64 = r.value;
 
         for (dst, a, b) |*d, aa, bb| {
-            // diff = b - a (handle underflow by adding MODULUS)
-            const diff: u64 = if (bb.value >= aa.value)
-                bb.value - aa.value
-            else
-                @as(u64, MODULUS) - aa.value + bb.value;
-
-            // result = a + r * diff
-            const prod = r_val * diff;
-            const result = @as(u64, aa.value) + prod;
+            // Branchless modular subtraction: diff = (b - a) mod p
+            // Adding MODULUS ensures no underflow; reduce64 handles the extra MODULUS
+            const diff: u64 = @as(u64, bb.value) +% MODULUS -% aa.value;
+            const prod = r_val *% diff;
+            const result = @as(u64, aa.value) +% prod;
             d.* = reduce64(result);
         }
     }

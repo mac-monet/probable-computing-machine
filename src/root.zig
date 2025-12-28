@@ -5,8 +5,8 @@ const std = @import("std");
 pub const Goldilocks = @import("fields/goldilocks.zig").Goldilocks;
 pub const Mersenne31 = @import("fields/mersenne31.zig").Mersenne31;
 
-// Re-export polynomial types
-pub const MultilinearPoly = @import("poly/multilinear.zig").MultilinearPoly;
+// Re-export polynomial modules
+pub const multilinear = @import("poly/multilinear.zig");
 
 pub fn bufferedPrint() !void {
     // Stdout is for the actual output of your application, for example if you
