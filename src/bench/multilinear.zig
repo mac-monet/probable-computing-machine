@@ -15,7 +15,7 @@ pub fn run(writer: anytype) !void {
     const allocator = gpa.allocator();
 
     // Benchmark different sizes
-    inline for ([_]usize{ 16, 20 }) |num_vars| {
+    inline for ([_]usize{ 16, 20, 24 }) |num_vars| {
         try benchSize(Mersenne31, num_vars, allocator, writer);
     }
 }
@@ -38,10 +38,6 @@ fn benchSize(comptime F: type, comptime num_vars: usize, allocator: std.mem.Allo
         p.* = F.fromU64(@truncate(i * 7 + 13));
     }
 
-    // Allocate destination for bind
-    const bind_dst = try allocator.alloc(F, size / 2);
-    defer allocator.free(bind_dst);
-
     const label_prefix = std.fmt.comptimePrint("n={d} ", .{num_vars});
 
     try bench.benchmark(
@@ -62,19 +58,40 @@ fn benchSize(comptime F: type, comptime num_vars: usize, allocator: std.mem.Allo
         writer,
     );
 
+    // Benchmark full evaluation: clone + bind all variables
+    const EvalWrapper = struct {
+        fn call(original_evals: []const F, pt: *const [num_vars]F, scratch: []F) F {
+            @memcpy(scratch, original_evals);
+            var current_size = original_evals.len;
+            for (pt) |r| {
+                const half = current_size / 2;
+                F.linearCombineBatch(scratch[0..half], scratch[0..half], scratch[half..current_size], r);
+                current_size = half;
+            }
+            return scratch[0];
+        }
+    };
+
+    // Allocate scratch buffer for evaluate benchmark
+    const scratch = try allocator.alloc(F, size);
+    defer allocator.free(scratch);
+
     try bench.benchmark(
         label_prefix ++ "evaluate",
         WARMUP,
         ITERS / 10,
-        MultilinearPoly(F).evaluate,
-        .{ &poly, &point },
+        EvalWrapper.call,
+        .{ poly.evals[0..size], &point, scratch },
         writer,
     );
 
-    // Wrap bind to match benchmark signature (returns void)
+    // Benchmark bind (in-place, so we need to reset poly each iteration)
     const BindWrapper = struct {
-        fn call(p: *MultilinearPoly(F), r: F, dst: []F) void {
-            p.bind(r, dst);
+        fn call(p: *MultilinearPoly(F), r: F, original_evals: []F) void {
+            // Reset poly to original state before bind
+            p.evals = original_evals;
+            p.num_vars = num_vars;
+            p.bind(r);
         }
     };
 
@@ -83,7 +100,7 @@ fn benchSize(comptime F: type, comptime num_vars: usize, allocator: std.mem.Allo
         WARMUP,
         ITERS,
         BindWrapper.call,
-        .{ &poly, F.fromU64(42), bind_dst },
+        .{ &poly, F.fromU64(42), poly.evals },
         writer,
     );
 }

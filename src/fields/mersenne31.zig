@@ -14,6 +14,7 @@ pub const Mersenne31 = struct {
 
     // ============ Core Arithmetic ============ //
 
+    // TODO this is slow because it reduces for every add op.
     pub fn add(a: Mersenne31, b: Mersenne31) Mersenne31 {
         // a + b < 2^32, fits in u32 with potential wrap
         var sum: u32 = a.value +% b.value;
@@ -73,6 +74,53 @@ pub const Mersenne31 = struct {
         std.debug.assert(dst.len == a.len and a.len == b.len and b.len == c.len);
         for (dst, a, b, c) |*d, aa, bb, cc| {
             d.* = mul(aa, bb).add(cc);
+        }
+    }
+
+    // ============ Batch Reductions (Delayed Reduction) ============ //
+    // These operations accumulate in u64 and reduce once at the end,
+    // avoiding per-element reduction overhead.
+
+    /// Sum all elements in a slice with delayed reduction.
+    /// Accumulates in u64, reduces once at the end.
+    pub fn sumSlice(values: []const Mersenne31) Mersenne31 {
+        var acc: u64 = 0;
+        for (values) |v| {
+            acc +%= v.value;
+        }
+        return reduce64(acc);
+    }
+
+    /// Compute dot product: sum(a[i] * b[i]) with delayed reduction.
+    /// Each product is reduced to u64, then accumulated.
+    pub fn dotProduct(a: []const Mersenne31, b: []const Mersenne31) Mersenne31 {
+        std.debug.assert(a.len == b.len);
+        var acc: u64 = 0;
+        for (a, b) |aa, bb| {
+            // Product fits in u62 (31 bits * 31 bits), safe to accumulate many
+            const prod: u64 = @as(u64, aa.value) * @as(u64, bb.value);
+            acc +%= prod;
+        }
+        return reduce64(acc);
+    }
+
+    /// Linear interpolation: dst[i] = a[i] + r * (b[i] - a[i])
+    /// Used for binding variables in multilinear polynomials.
+    pub fn linearCombineBatch(dst: []Mersenne31, a: []const Mersenne31, b: []const Mersenne31, r: Mersenne31) void {
+        std.debug.assert(dst.len == a.len and a.len == b.len);
+        const r_val: u64 = r.value;
+
+        for (dst, a, b) |*d, aa, bb| {
+            // diff = b - a (handle underflow by adding MODULUS)
+            const diff: u64 = if (bb.value >= aa.value)
+                bb.value - aa.value
+            else
+                @as(u64, MODULUS) - aa.value + bb.value;
+
+            // result = a + r * diff
+            const prod = r_val * diff;
+            const result = @as(u64, aa.value) + prod;
+            d.* = reduce64(result);
         }
     }
 
@@ -136,9 +184,11 @@ pub const Mersenne31 = struct {
         }
     }
 
-    // ============ Internal ============ //
+    // ============ Reduction ============ //
 
-    fn reduce64(x: u64) Mersenne31 {
+    /// Reduce a u64 to a canonical Mersenne31 element.
+    /// Public for use in batch operations with delayed reduction.
+    pub fn reduce64(x: u64) Mersenne31 {
         // Reduce x mod (2^31 - 1)
         // Key: 2^31 ≡ 1 (mod p)
         // So: x = lo + hi * 2^31 ≡ lo + hi (mod p)
@@ -343,6 +393,122 @@ test "batch ops match scalar ops" {
     Mersenne31.mulAddBatch(&mac_dst, &a, &b, &a);
     for (0..4) |i| {
         try std.testing.expect(mac_dst[i].eql(a[i].mul(b[i]).add(a[i])));
+    }
+}
+
+// ============ Batch Reduction Tests ============ //
+
+test "sumSlice matches iterative add" {
+    const values = [_]Mersenne31{
+        Mersenne31.fromU32(100),
+        Mersenne31.fromU32(200),
+        Mersenne31.fromU32(300),
+        Mersenne31.fromU32(Mersenne31.MODULUS - 1),
+        Mersenne31.fromU32(Mersenne31.MODULUS - 2),
+    };
+
+    // Compute using sumSlice
+    const fast_sum = Mersenne31.sumSlice(&values);
+
+    // Compute using iterative add
+    var slow_sum = Mersenne31.zero;
+    for (values) |v| {
+        slow_sum = slow_sum.add(v);
+    }
+
+    try std.testing.expect(fast_sum.eql(slow_sum));
+}
+
+test "sumSlice empty slice" {
+    const empty: []const Mersenne31 = &.{};
+    try std.testing.expect(Mersenne31.sumSlice(empty).isZero());
+}
+
+test "sumSlice large accumulation" {
+    // Test that delayed reduction handles large sums correctly
+    const p = Mersenne31.MODULUS;
+    var values: [1000]Mersenne31 = undefined;
+    for (&values) |*v| {
+        v.* = Mersenne31{ .value = p - 1 }; // max value
+    }
+
+    const result = Mersenne31.sumSlice(&values);
+
+    // Expected: 1000 * (p-1) mod p = 1000 * (-1) mod p = -1000 mod p = p - 1000
+    const expected = Mersenne31.fromU64(@as(u64, 1000) * (p - 1));
+    try std.testing.expect(result.eql(expected));
+}
+
+test "dotProduct matches iterative mul-add" {
+    const a = [_]Mersenne31{
+        Mersenne31.fromU32(2),
+        Mersenne31.fromU32(3),
+        Mersenne31.fromU32(4),
+    };
+    const b = [_]Mersenne31{
+        Mersenne31.fromU32(5),
+        Mersenne31.fromU32(6),
+        Mersenne31.fromU32(7),
+    };
+
+    // Fast: dotProduct
+    const fast = Mersenne31.dotProduct(&a, &b);
+
+    // Slow: iterative
+    var slow = Mersenne31.zero;
+    for (a, b) |aa, bb| {
+        slow = slow.add(aa.mul(bb));
+    }
+
+    // 2*5 + 3*6 + 4*7 = 10 + 18 + 28 = 56
+    try std.testing.expect(fast.eql(slow));
+    try std.testing.expect(fast.eql(Mersenne31.fromU32(56)));
+}
+
+test "linearCombineBatch matches scalar computation" {
+    const a = [_]Mersenne31{
+        Mersenne31.fromU32(10),
+        Mersenne31.fromU32(20),
+        Mersenne31.fromU32(30),
+    };
+    const b = [_]Mersenne31{
+        Mersenne31.fromU32(50),
+        Mersenne31.fromU32(60),
+        Mersenne31.fromU32(70),
+    };
+    const r = Mersenne31.fromU32(3);
+
+    var dst: [3]Mersenne31 = undefined;
+    Mersenne31.linearCombineBatch(&dst, &a, &b, r);
+
+    // Check: dst[i] = a[i] + r * (b[i] - a[i])
+    for (dst, a, b) |result, aa, bb| {
+        const diff = bb.sub(aa);
+        const expected = aa.add(r.mul(diff));
+        try std.testing.expect(result.eql(expected));
+    }
+}
+
+test "linearCombineBatch handles b < a (underflow)" {
+    // Test case where b[i] < a[i], requiring underflow handling
+    const a = [_]Mersenne31{
+        Mersenne31.fromU32(100),
+        Mersenne31.fromU32(200),
+    };
+    const b = [_]Mersenne31{
+        Mersenne31.fromU32(50), // b < a
+        Mersenne31.fromU32(150), // b < a
+    };
+    const r = Mersenne31.fromU32(2);
+
+    var dst: [2]Mersenne31 = undefined;
+    Mersenne31.linearCombineBatch(&dst, &a, &b, r);
+
+    // Verify against scalar
+    for (dst, a, b) |result, aa, bb| {
+        const diff = bb.sub(aa);
+        const expected = aa.add(r.mul(diff));
+        try std.testing.expect(result.eql(expected));
     }
 }
 
