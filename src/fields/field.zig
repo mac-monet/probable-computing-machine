@@ -19,15 +19,22 @@ pub fn verify(comptime F: type) void {
     _ = F.zero;
     _ = F.one;
 
-    // Core arithmetic
+    // Core arithmetic (scalar)
     _ = @as(fn (F, F) F, F.add);
     _ = @as(fn (F, F) F, F.sub);
     _ = @as(fn (F, F) F, F.mul);
     _ = @as(fn (F) F, F.neg);
-    _ = @as(fn ([]F, []F, []F) void, F.addBatch);
-    _ = @as(fn ([]F, []F, []F) void, F.mulBatch);
-    _ = @as(fn ([]F, []F, []F) void, F.subBatch);
-    _ = @as(fn ([]F, []F, []F, []F) void, F.mulAddBatch);
+
+    // Batch arithmetic
+    _ = @as(fn ([]F, []const F, []const F) void, F.addBatch);
+    _ = @as(fn ([]F, []const F, []const F) void, F.mulBatch);
+    _ = @as(fn ([]F, []const F, []const F) void, F.subBatch);
+    _ = @as(fn ([]F, []const F, []const F, []const F) void, F.mulAddBatch);
+    _ = @as(fn ([]F, []const F, []const F, F) void, F.linearCombineBatch);
+
+    // Batch reductions
+    _ = @as(fn ([]const F) F, F.sumSlice);
+    _ = @as(fn ([]const F, []const F) F, F.dotProduct);
 
     // Extended arithmetic
     _ = @as(fn (F) F, F.square);

@@ -47,7 +47,7 @@ pub const Mersenne31 = struct {
     // ============ Batch Arithmetic ============ //
     // TODO SIMD optimize later
 
-    pub fn addBatch(dst: []Mersenne31, a: []Mersenne31, b: []Mersenne31) void {
+    pub fn addBatch(dst: []Mersenne31, a: []const Mersenne31, b: []const Mersenne31) void {
         std.debug.assert(dst.len == a.len and a.len == b.len);
         for (dst, a, b) |*d, aa, bb| {
             d.* = add(aa, bb);

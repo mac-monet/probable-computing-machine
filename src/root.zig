@@ -2,7 +2,6 @@
 const std = @import("std");
 
 // Re-export field types
-pub const Goldilocks = @import("fields/goldilocks.zig").Goldilocks;
 pub const Mersenne31 = @import("fields/mersenne31.zig").Mersenne31;
 
 // Re-export polynomial modules
@@ -23,7 +22,6 @@ pub fn bufferedPrint() !void {
 
 test {
     // Import modules to include their tests
-    _ = @import("fields/goldilocks.zig");
     _ = @import("fields/mersenne31.zig");
     _ = @import("poly/multilinear.zig");
 }
