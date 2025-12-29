@@ -2,7 +2,7 @@ const std = @import("std");
 const field = @import("field.zig");
 
 /// Mersenne-31: p = 2^31 - 1
-pub const Mersenne31 = struct {
+pub const Mersenne31 = packed struct(u32) {
     value: u32,
 
     // p = 2^31 - 1
@@ -44,103 +44,153 @@ pub const Mersenne31 = struct {
         return if (a.value == 0) a else .{ .value = MODULUS - a.value };
     }
 
-    // ============ Batch Arithmetic ============ //
-    // TODO SIMD optimize later
+    // ============ Batch Operations ============ //
 
-    pub fn addBatch(dst: []Mersenne31, a: []const Mersenne31, b: []const Mersenne31) void {
-        std.debug.assert(dst.len == a.len and a.len == b.len);
-        for (dst, a, b) |*d, aa, bb| {
-            d.* = add(aa, bb);
-        }
-    }
-
-    pub fn mulBatch(dst: []Mersenne31, a: []const Mersenne31, b: []const Mersenne31) void {
-        std.debug.assert(dst.len == a.len and a.len == b.len);
-        for (dst, a, b) |*d, aa, bb| {
-            d.* = mul(aa, bb);
-        }
-    }
-
-    pub fn subBatch(dst: []Mersenne31, a: []const Mersenne31, b: []const Mersenne31) void {
-        std.debug.assert(dst.len == a.len and a.len == b.len);
-        for (dst, a, b) |*d, aa, bb| {
-            d.* = sub(aa, bb);
-        }
-    }
-
-    // Fused multiply-add: dst[i] = a[i] * b[i] + c[i]
-    pub fn mulAddBatch(dst: []Mersenne31, a: []const Mersenne31, b: []const Mersenne31, c: []const Mersenne31) void {
-        std.debug.assert(dst.len == a.len and a.len == b.len and b.len == c.len);
-        for (dst, a, b, c) |*d, aa, bb, cc| {
-            d.* = mul(aa, bb).add(cc);
-        }
-    }
-
-    // ============ Batch Reductions (Delayed Reduction) ============ //
-    // These operations accumulate in u64 and reduce once at the end,
-    // avoiding per-element reduction overhead.
-
-    /// Sum all elements in a slice with delayed reduction.
-    /// Accumulates in u64, reduces once at the end.
-    pub fn sumSlice(values: []const Mersenne31) Mersenne31 {
-        var acc: u64 = 0;
-        for (values) |v| {
-            acc +%= v.value;
-        }
-        return reduce64(acc);
-    }
-
-    /// Sum N slices in a single pass with N independent accumulators.
-    /// All slices must have the same length. Comptime N enables full unrolling
-    /// and register allocation for accumulators - SIMD friendly.
+    /// Sum N slices with sequential per-slice access.
+    /// Each slice is processed entirely before moving to the next.
+    /// LLVM auto-vectorizes this well; explicit SIMD adds overhead.
     pub fn sumSlices(comptime N: usize, slices: [N][]const Mersenne31) [N]Mersenne31 {
         const len = slices[0].len;
-        comptime var i = 1;
-        inline while (i < N) : (i += 1) {
-            std.debug.assert(slices[i].len == len);
-        }
-
-        var accs: [N]u64 = .{0} ** N;
-        for (0..len) |idx| {
-            inline for (0..N) |s| {
-                accs[s] +%= slices[s][idx].value;
-            }
+        comptime var check = 1;
+        inline while (check < N) : (check += 1) {
+            std.debug.assert(slices[check].len == len);
         }
 
         var results: [N]Mersenne31 = undefined;
         inline for (0..N) |s| {
-            results[s] = reduce64(accs[s]);
+            var acc: u64 = 0;
+            for (slices[s]) |v| {
+                acc +%= v.value;
+            }
+            results[s] = reduce64(acc);
         }
         return results;
     }
 
-    /// Compute dot product: sum(a[i] * b[i]) with delayed reduction.
-    /// Each product is reduced to u64, then accumulated.
+    /// Compute dot product: sum(a[i] * b[i]) with SIMD acceleration.
+    /// Uses partial reduction per product to avoid overflow.
+    /// For best performance, inputs should be aligned to simd.alignment bytes.
     pub fn dotProduct(a: []const Mersenne31, b: []const Mersenne31) Mersenne31 {
         std.debug.assert(a.len == b.len);
-        var acc: u64 = 0;
-        for (a, b) |aa, bb| {
-            // Product fits in u62 (31 bits * 31 bits), safe to accumulate many
-            const prod: u64 = @as(u64, aa.value) * @as(u64, bb.value);
-            acc +%= prod;
+
+        const simd = @import("../simd.zig");
+        const VEC_LEN = simd.u32_len orelse 4;
+        const VecU64 = @Vector(VEC_LEN, u64);
+
+        const len = a.len;
+
+        // VEC_LEN parallel accumulators - horizontal sum only at the end
+        var acc: VecU64 = @splat(0);
+
+        // SIMD loop: process VEC_LEN elements per iteration
+        var i: usize = 0;
+        while (i + VEC_LEN <= len) : (i += VEC_LEN) {
+            acc +%= dotProductChunk(VEC_LEN, a[i..][0..VEC_LEN], b[i..][0..VEC_LEN]);
         }
-        return reduce64(acc);
+
+        // Horizontal sum of parallel accumulators
+        var scalar_acc: u64 = @reduce(.Add, acc);
+
+        // Tail loop: process remaining elements
+        while (i < len) : (i += 1) {
+            const prod: u64 = @as(u64, a[i].value) * @as(u64, b[i].value);
+            // Partial reduction: 62 bits → ~32 bits
+            scalar_acc +%= (prod & MODULUS) + (prod >> 31);
+        }
+
+        return reduce64(scalar_acc);
+    }
+
+    /// Process one chunk of VEC_LEN elements for dotProduct.
+    /// Returns vector of partial products (each reduced to ~32 bits).
+    inline fn dotProductChunk(
+        comptime VEC_LEN: comptime_int,
+        a: *const [VEC_LEN]Mersenne31,
+        b: *const [VEC_LEN]Mersenne31,
+    ) @Vector(VEC_LEN, u64) {
+        const VecU32 = @Vector(VEC_LEN, u32);
+        const VecU64 = @Vector(VEC_LEN, u64);
+
+        // Load as u32 vectors (safe due to packed struct layout)
+        const a_vec: VecU32 = @bitCast(a.*);
+        const b_vec: VecU32 = @bitCast(b.*);
+
+        // Widen to u64 for multiply
+        const a_wide: VecU64 = a_vec;
+        const b_wide: VecU64 = b_vec;
+
+        // Multiply: result is ~62 bits per lane
+        const prod: VecU64 = a_wide *% b_wide;
+
+        // Partial reduction per product: 62 bits → ~32 bits
+        // This allows accumulating billions of products without overflow.
+        // Key: (prod & MODULUS) + (prod >> 31) ≡ prod (mod p)
+        const mask: VecU64 = @splat(@as(u64, MODULUS));
+        const lo = prod & mask;
+        const hi = prod >> @as(@Vector(VEC_LEN, u6), @splat(31));
+
+        return lo +% hi;
     }
 
     /// Linear interpolation: dst[i] = a[i] + r * (b[i] - a[i])
     /// Used for binding variables in multilinear polynomials.
+    /// For best performance, inputs should be aligned to simd.alignment bytes.
     pub fn linearCombineBatch(dst: []Mersenne31, a: []const Mersenne31, b: []const Mersenne31, r: Mersenne31) void {
         std.debug.assert(dst.len == a.len and a.len == b.len);
+
+        const simd = @import("../simd.zig");
+        const VEC_LEN = simd.u32_len orelse 4;
+
+        const len = dst.len;
         const r_val: u64 = r.value;
 
-        for (dst, a, b) |*d, aa, bb| {
-            // Branchless modular subtraction: diff = (b - a) mod p
-            // Adding MODULUS ensures no underflow; reduce64 handles the extra MODULUS
-            const diff: u64 = @as(u64, bb.value) +% MODULUS -% aa.value;
-            const prod = r_val *% diff;
-            const result = @as(u64, aa.value) +% prod;
-            d.* = reduce64(result);
+        // SIMD loop: process VEC_LEN elements per iteration
+        var i: usize = 0;
+        while (i + VEC_LEN <= len) : (i += VEC_LEN) {
+            linearCombineChunk(VEC_LEN, dst[i..][0..VEC_LEN], a[i..][0..VEC_LEN], b[i..][0..VEC_LEN], r_val);
         }
+
+        // Tail loop: process remaining elements
+        while (i < len) : (i += 1) {
+            const diff: u64 = @as(u64, b[i].value) +% MODULUS -% a[i].value;
+            const prod = r_val *% diff;
+            const result = @as(u64, a[i].value) +% prod;
+            dst[i] = reduce64(result);
+        }
+    }
+
+    /// Process one chunk of VEC_LEN elements for linearCombineBatch.
+    /// Extracted to help LLVM optimize the SIMD operations.
+    inline fn linearCombineChunk(
+        comptime VEC_LEN: comptime_int,
+        dst: *[VEC_LEN]Mersenne31,
+        a: *const [VEC_LEN]Mersenne31,
+        b: *const [VEC_LEN]Mersenne31,
+        r_val: u64,
+    ) void {
+        const VecU32 = @Vector(VEC_LEN, u32);
+        const VecU64 = @Vector(VEC_LEN, u64);
+
+        // Load as u32 vectors (safe due to packed struct layout)
+        const a_vec: VecU32 = @bitCast(a.*);
+        const b_vec: VecU32 = @bitCast(b.*);
+
+        // Compute diff in u32: b + MODULUS - a
+        // No overflow: values < MODULUS, so b + MODULUS < 2^32
+        const modulus_vec: VecU32 = @splat(MODULUS);
+        const diff_vec: VecU32 = b_vec +% modulus_vec -% a_vec;
+
+        // Widen to u64 for multiply
+        const diff_wide: VecU64 = diff_vec;
+        const a_wide: VecU64 = a_vec;
+        const r_vec: VecU64 = @splat(r_val);
+
+        // prod = r * diff, result = a + prod
+        const prod: VecU64 = r_vec *% diff_wide;
+        const result: VecU64 = a_wide +% prod;
+
+        // Reduce and store
+        dst.* = @bitCast(reduce64Vec(VEC_LEN, result));
     }
 
     // ============ Derived Arithmetic ============ //
@@ -206,6 +256,29 @@ pub const Mersenne31 = struct {
 
     // ============ Reduction ============ //
 
+    /// Reduce a vector of u64 values to canonical Mersenne31 u32 values.
+    /// Used by batch operations for SIMD reduction.
+    inline fn reduce64Vec(comptime N: comptime_int, x: @Vector(N, u64)) @Vector(N, u32) {
+        const VecU64 = @Vector(N, u64);
+        const mask: VecU64 = @splat(@as(u64, MODULUS));
+
+        // Step 1: 64 bits → ~32 bits
+        const lo1 = x & mask;
+        const hi1 = x >> @as(@Vector(N, u6), @splat(31));
+        var sum = lo1 +% hi1;
+
+        // Step 2: ~32 bits → 31 bits
+        const lo2 = sum & mask;
+        const hi2 = sum >> @as(@Vector(N, u6), @splat(31));
+        sum = lo2 +% hi2;
+
+        // Step 3: branchless final reduction
+        const ge_mask = sum >= mask;
+        sum = @select(u64, ge_mask, sum -% mask, sum);
+
+        return @truncate(sum);
+    }
+
     /// Reduce a u64 to a canonical Mersenne31 element.
     /// Public for use in batch operations with delayed reduction.
     pub fn reduce64(x: u64) Mersenne31 {
@@ -233,6 +306,10 @@ pub const Mersenne31 = struct {
 comptime {
     field.verify(Mersenne31);
     _ = field.tests(Mersenne31);
+
+    // Verify packed struct layout for SIMD compatibility
+    std.debug.assert(@sizeOf(Mersenne31) == 4);
+    std.debug.assert(@bitSizeOf(Mersenne31) == 32);
 }
 
 // ============ Mersenne31-Specific Tests ============ //
@@ -377,48 +454,7 @@ test "fromBytes rejects invalid values" {
 
 // ============ Batch Operation Tests ============ //
 
-test "batch ops match scalar ops" {
-    var a = [_]Mersenne31{
-        Mersenne31.fromU32(0),
-        Mersenne31.fromU32(1),
-        Mersenne31.fromU32(2),
-        Mersenne31.fromU32(1234567),
-    };
-    var b = [_]Mersenne31{
-        Mersenne31.fromU32(3),
-        Mersenne31.fromU32(Mersenne31.MODULUS - 1),
-        Mersenne31.fromU32(5),
-        Mersenne31.fromU32(7654321),
-    };
-
-    var add_dst: [4]Mersenne31 = undefined;
-    Mersenne31.addBatch(&add_dst, &a, &b);
-    for (0..4) |i| {
-        try std.testing.expect(add_dst[i].eql(a[i].add(b[i])));
-    }
-
-    var mul_dst: [4]Mersenne31 = undefined;
-    Mersenne31.mulBatch(&mul_dst, &a, &b);
-    for (0..4) |i| {
-        try std.testing.expect(mul_dst[i].eql(a[i].mul(b[i])));
-    }
-
-    var sub_dst: [4]Mersenne31 = undefined;
-    Mersenne31.subBatch(&sub_dst, &a, &b);
-    for (0..4) |i| {
-        try std.testing.expect(sub_dst[i].eql(a[i].sub(b[i])));
-    }
-
-    var mac_dst: [4]Mersenne31 = undefined;
-    Mersenne31.mulAddBatch(&mac_dst, &a, &b, &a);
-    for (0..4) |i| {
-        try std.testing.expect(mac_dst[i].eql(a[i].mul(b[i]).add(a[i])));
-    }
-}
-
-// ============ Batch Reduction Tests ============ //
-
-test "sumSlice matches iterative add" {
+test "sumSlices matches iterative add" {
     const values = [_]Mersenne31{
         Mersenne31.fromU32(100),
         Mersenne31.fromU32(200),
@@ -427,8 +463,8 @@ test "sumSlice matches iterative add" {
         Mersenne31.fromU32(Mersenne31.MODULUS - 2),
     };
 
-    // Compute using sumSlice
-    const fast_sum = Mersenne31.sumSlice(&values);
+    // Compute using sumSlices with N=1
+    const fast_sum = Mersenne31.sumSlices(1, .{&values})[0];
 
     // Compute using iterative add
     var slow_sum = Mersenne31.zero;
@@ -439,12 +475,12 @@ test "sumSlice matches iterative add" {
     try std.testing.expect(fast_sum.eql(slow_sum));
 }
 
-test "sumSlice empty slice" {
+test "sumSlices empty slice" {
     const empty: []const Mersenne31 = &.{};
-    try std.testing.expect(Mersenne31.sumSlice(empty).isZero());
+    try std.testing.expect(Mersenne31.sumSlices(1, .{empty})[0].isZero());
 }
 
-test "sumSlice large accumulation" {
+test "sumSlices large accumulation" {
     // Test that delayed reduction handles large sums correctly
     const p = Mersenne31.MODULUS;
     var values: [1000]Mersenne31 = undefined;
@@ -452,11 +488,36 @@ test "sumSlice large accumulation" {
         v.* = Mersenne31{ .value = p - 1 }; // max value
     }
 
-    const result = Mersenne31.sumSlice(&values);
+    const result = Mersenne31.sumSlices(1, .{&values})[0];
 
     // Expected: 1000 * (p-1) mod p = 1000 * (-1) mod p = -1000 mod p = p - 1000
     const expected = Mersenne31.fromU64(@as(u64, 1000) * (p - 1));
     try std.testing.expect(result.eql(expected));
+}
+
+test "sumSlices multiple slices (sumcheck pattern)" {
+    // Simulates sumcheck: sum left half and right half of evaluations
+    const evals = [_]Mersenne31{
+        // Left half (x_0 = 0)
+        Mersenne31.fromU32(10),
+        Mersenne31.fromU32(20),
+        Mersenne31.fromU32(30),
+        Mersenne31.fromU32(40),
+        // Right half (x_0 = 1)
+        Mersenne31.fromU32(15),
+        Mersenne31.fromU32(25),
+        Mersenne31.fromU32(35),
+        Mersenne31.fromU32(45),
+    };
+
+    const half = evals.len / 2;
+    const sums = Mersenne31.sumSlices(2, .{ evals[0..half], evals[half..] });
+
+    // Verify against manual sums
+    // Left: 10 + 20 + 30 + 40 = 100
+    // Right: 15 + 25 + 35 + 45 = 120
+    try std.testing.expect(sums[0].eql(Mersenne31.fromU32(100)));
+    try std.testing.expect(sums[1].eql(Mersenne31.fromU32(120)));
 }
 
 test "dotProduct matches iterative mul-add" {
@@ -483,6 +544,36 @@ test "dotProduct matches iterative mul-add" {
     // 2*5 + 3*6 + 4*7 = 10 + 18 + 28 = 56
     try std.testing.expect(fast.eql(slow));
     try std.testing.expect(fast.eql(Mersenne31.fromU32(56)));
+}
+
+test "dotProduct large accumulation (overflow)" {
+    // Test that dotProduct handles large accumulations correctly.
+    // Each product is ~62 bits: (2^31-2)^2 ≈ 2^62
+    // A u64 accumulator overflows after just 4 products.
+    // Wrapping arithmetic causes error because 2^64 ≡ 4 (mod p), not 0.
+    const p = Mersenne31.MODULUS;
+    const max_val = Mersenne31{ .value = p - 1 }; // 2^31 - 2
+
+    // Use 16 elements - enough to trigger multiple overflows
+    var a: [16]Mersenne31 = undefined;
+    var b: [16]Mersenne31 = undefined;
+    for (&a, &b) |*aa, *bb| {
+        aa.* = max_val;
+        bb.* = max_val;
+    }
+
+    // Fast: dotProduct
+    const fast = Mersenne31.dotProduct(&a, &b);
+
+    // Slow: iterative with proper reduction each step
+    var slow = Mersenne31.zero;
+    for (a, b) |aa, bb| {
+        slow = slow.add(aa.mul(bb));
+    }
+
+    // If dotProduct uses wrapping arithmetic incorrectly,
+    // each overflow adds an error of 4 to the result.
+    try std.testing.expect(fast.eql(slow));
 }
 
 test "linearCombineBatch matches scalar computation" {
@@ -574,4 +665,158 @@ test "Fermat's little theorem" {
 
     const b = Mersenne31.fromU64(9999999);
     try std.testing.expect(b.pow(Mersenne31.MODULUS - 1).eql(Mersenne31.one));
+}
+
+// ============ Aligned Allocation Tests ============ //
+
+test "dotProduct with aligned allocation" {
+    const simd = @import("../simd.zig");
+    const allocator = std.testing.allocator;
+
+    // Test with exact SIMD multiple (32 elements)
+    const n_exact = 32;
+    const a_exact = try allocator.alignedAlloc(Mersenne31, simd.alignment, n_exact);
+    defer allocator.free(a_exact);
+    const b_exact = try allocator.alignedAlloc(Mersenne31, simd.alignment, n_exact);
+    defer allocator.free(b_exact);
+
+    for (a_exact, b_exact, 0..) |*aa, *bb, i| {
+        aa.* = Mersenne31.fromU32(@intCast(i + 1));
+        bb.* = Mersenne31.fromU32(@intCast(i + 100));
+    }
+
+    const fast_exact = Mersenne31.dotProduct(a_exact, b_exact);
+    var slow_exact = Mersenne31.zero;
+    for (a_exact, b_exact) |aa, bb| {
+        slow_exact = slow_exact.add(aa.mul(bb));
+    }
+    try std.testing.expect(fast_exact.eql(slow_exact));
+
+    // Test with tail (37 elements = 32 + 5 tail on AVX2, or other combos)
+    const n_tail = 37;
+    const a_tail = try allocator.alignedAlloc(Mersenne31, simd.alignment, n_tail);
+    defer allocator.free(a_tail);
+    const b_tail = try allocator.alignedAlloc(Mersenne31, simd.alignment, n_tail);
+    defer allocator.free(b_tail);
+
+    for (a_tail, b_tail, 0..) |*aa, *bb, i| {
+        aa.* = Mersenne31.fromU32(@intCast(i * 7 + 3));
+        bb.* = Mersenne31.fromU32(@intCast(i * 11 + 5));
+    }
+
+    const fast_tail = Mersenne31.dotProduct(a_tail, b_tail);
+    var slow_tail = Mersenne31.zero;
+    for (a_tail, b_tail) |aa, bb| {
+        slow_tail = slow_tail.add(aa.mul(bb));
+    }
+    try std.testing.expect(fast_tail.eql(slow_tail));
+}
+
+test "linearCombineBatch with aligned allocation" {
+    const simd = @import("../simd.zig");
+    const allocator = std.testing.allocator;
+
+    // Test with exact SIMD multiple (32 elements)
+    const n_exact = 32;
+    const a = try allocator.alignedAlloc(Mersenne31, simd.alignment, n_exact);
+    defer allocator.free(a);
+    const b = try allocator.alignedAlloc(Mersenne31, simd.alignment, n_exact);
+    defer allocator.free(b);
+    const dst = try allocator.alignedAlloc(Mersenne31, simd.alignment, n_exact);
+    defer allocator.free(dst);
+
+    for (a, b, 0..) |*aa, *bb, i| {
+        aa.* = Mersenne31.fromU32(@intCast(i * 3 + 10));
+        bb.* = Mersenne31.fromU32(@intCast(i * 5 + 50));
+    }
+    const r = Mersenne31.fromU32(7);
+
+    Mersenne31.linearCombineBatch(dst, a, b, r);
+
+    // Verify against scalar
+    for (dst, a, b) |result, aa, bb| {
+        const diff = bb.sub(aa);
+        const expected = aa.add(r.mul(diff));
+        try std.testing.expect(result.eql(expected));
+    }
+
+    // Test with tail (37 elements)
+    const n_tail = 37;
+    const a2 = try allocator.alignedAlloc(Mersenne31, simd.alignment, n_tail);
+    defer allocator.free(a2);
+    const b2 = try allocator.alignedAlloc(Mersenne31, simd.alignment, n_tail);
+    defer allocator.free(b2);
+    const dst2 = try allocator.alignedAlloc(Mersenne31, simd.alignment, n_tail);
+    defer allocator.free(dst2);
+
+    for (a2, b2, 0..) |*aa, *bb, i| {
+        aa.* = Mersenne31.fromU32(@intCast(i * 13 + 1));
+        bb.* = Mersenne31.fromU32(@intCast(i * 17 + 2));
+    }
+
+    Mersenne31.linearCombineBatch(dst2, a2, b2, r);
+
+    for (dst2, a2, b2) |result, aa, bb| {
+        const diff = bb.sub(aa);
+        const expected = aa.add(r.mul(diff));
+        try std.testing.expect(result.eql(expected));
+    }
+}
+
+test "dotProduct large aligned (stress SIMD accumulation)" {
+    const simd = @import("../simd.zig");
+    const allocator = std.testing.allocator;
+
+    // Large array to stress SIMD accumulation over many iterations
+    const n = 1024;
+    const a = try allocator.alignedAlloc(Mersenne31, simd.alignment, n);
+    defer allocator.free(a);
+    const b = try allocator.alignedAlloc(Mersenne31, simd.alignment, n);
+    defer allocator.free(b);
+
+    // Use near-max values to stress overflow handling
+    const max_val = Mersenne31{ .value = Mersenne31.MODULUS - 1 };
+    for (a, b) |*aa, *bb| {
+        aa.* = max_val;
+        bb.* = max_val;
+    }
+
+    const fast = Mersenne31.dotProduct(a, b);
+
+    // Scalar reference
+    var slow = Mersenne31.zero;
+    for (a, b) |aa, bb| {
+        slow = slow.add(aa.mul(bb));
+    }
+
+    try std.testing.expect(fast.eql(slow));
+}
+
+test "linearCombineBatch large aligned" {
+    const simd = @import("../simd.zig");
+    const allocator = std.testing.allocator;
+
+    const n = 1024;
+    const a = try allocator.alignedAlloc(Mersenne31, simd.alignment, n);
+    defer allocator.free(a);
+    const b = try allocator.alignedAlloc(Mersenne31, simd.alignment, n);
+    defer allocator.free(b);
+    const dst = try allocator.alignedAlloc(Mersenne31, simd.alignment, n);
+    defer allocator.free(dst);
+
+    // Mix of values including edge cases
+    for (a, b, 0..) |*aa, *bb, i| {
+        aa.* = Mersenne31.fromU32(@intCast(i * 1000 % Mersenne31.MODULUS));
+        bb.* = Mersenne31.fromU32(@intCast((i * 7777 + 123) % Mersenne31.MODULUS));
+    }
+    const r = Mersenne31.fromU32(999999);
+
+    Mersenne31.linearCombineBatch(dst, a, b, r);
+
+    // Verify against scalar
+    for (dst, a, b) |result, aa, bb| {
+        const diff = bb.sub(aa);
+        const expected = aa.add(r.mul(diff));
+        try std.testing.expect(result.eql(expected));
+    }
 }

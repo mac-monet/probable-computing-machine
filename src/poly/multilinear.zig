@@ -11,7 +11,7 @@ pub fn bind(comptime F: type, evals: []F, r: F) []F {
 
 /// Sum over the boolean hypercube: sum_{x in {0,1}^n} f(x)
 pub fn sum(comptime F: type, evals: []const F) F {
-    return F.sumSlice(evals);
+    return F.sumSlices(1, .{evals})[0];
 }
 
 /// Sum each half of the hypercube.

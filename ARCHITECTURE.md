@@ -449,6 +449,116 @@ return F.reduce64(acc);  // Single reduction
 
 ---
 
+## Future Optimizations
+
+### Batched Sumcheck
+
+When verifying multiple polynomial claims simultaneously, combine them into a single sumcheck:
+
+**Problem:** k separate claims require k × n rounds
+```
+claim_1: Σ f_1(x) = c_1
+claim_2: Σ f_2(x) = c_2
+...
+claim_k: Σ f_k(x) = c_k
+```
+
+**Solution:** Random linear combination into single claim
+```
+Verifier sends random α
+Combined: Σ (f_1(x) + α·f_2(x) + α²·f_3(x) + ...) = c_1 + α·c_2 + α²·c_3 + ...
+Single sumcheck: n rounds instead of k × n
+```
+
+**Optimal Data Layout:**
+
+```zig
+// Interleaved k-tuples for cache efficiency
+// evals[i] = [f_0(x_i), f_1(x_i), ..., f_{k-1}(x_i)]
+evals: [][k]Mersenne31   // 2^n groups of k elements
+
+// Each iteration accesses all k values at same hypercube index
+// k values contiguous → single cache line (for small k)
+// Combination Σ αⁱ·f_i(x) is a dot product
+```
+
+**When to use:**
+- GKR protocol (multiple layer claims)
+- Batch verification (N proofs at once)
+- Multi-instance proofs (N executions of same circuit)
+
+**Trade-off with k:**
+- Small k (2-8): k-tuple fits in cache line, interleaved wins
+- Large k (100+): Tuple spans cache lines, separate buffers may be better
+
+### Multi-threading
+
+Sumcheck operations are embarrassingly parallel within each round:
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                    sumHalves (parallel)                  │
+├─────────────────────────────────────────────────────────┤
+│  Thread 0        Thread 1        Thread 2        Thread 3│
+│  ┌─────────┐    ┌─────────┐    ┌─────────┐    ┌─────────┐│
+│  │chunk 0  │    │chunk 1  │    │chunk 2  │    │chunk 3  ││
+│  │partial  │    │partial  │    │partial  │    │partial  ││
+│  │sum      │    │sum      │    │sum      │    │sum      ││
+│  └────┬────┘    └────┬────┘    └────┬────┘    └────┬────┘│
+│       └──────────────┴──────────────┴──────────────┘     │
+│                          ↓                               │
+│                   Combine partials                       │
+│                   (single reduce)                        │
+└─────────────────────────────────────────────────────────┘
+```
+
+**Parallelizable operations:**
+- `sumSlices`: Each thread sums a chunk, combine at end
+- `linearCombineBatch` (bind): Each thread processes a range
+- `dotProduct`: Same pattern as sum
+
+**Implementation approach:**
+```zig
+// Static thread pool (avoid allocation per call)
+const ThreadPool = struct {
+    workers: [NUM_THREADS]Worker,
+
+    fn parallelSum(slices: []const Mersenne31) Mersenne31 {
+        // Divide work, each thread returns partial sum
+        // Main thread combines partials
+    }
+};
+```
+
+**Expected speedup:**
+- n=24 (16M elements): ~4x with 8 cores (memory-bound)
+- n=20 (1M elements): ~3x (starts fitting in L3)
+- n=16 (64K elements): ~2x (L3 cache, less parallelism benefit)
+
+**Memory considerations:**
+- Each thread needs its own accumulator (no contention)
+- Chunk boundaries should align to cache lines (64 bytes)
+- For batched sumcheck: partition by hypercube index, not by polynomial
+
+### SIMD Observations
+
+From benchmarking on Apple Silicon:
+
+| Operation | Explicit SIMD | LLVM Auto-vectorize | Winner |
+|-----------|---------------|---------------------|--------|
+| sumSlices | Slower (4x) | Faster | LLVM |
+| linearCombineBatch | 1.3-1.5x faster | Baseline | Explicit |
+| dotProduct | TBD | TBD | TBD |
+
+**Key insight:** Simple reductions (sum) are memory-bound and LLVM auto-vectorizes well. Complex arithmetic (multiply + reduce) benefits from explicit SIMD because compute hides memory latency.
+
+**Guidelines:**
+- Trust LLVM for simple loops (sum, copy)
+- Explicit SIMD for: multiply, field reduction, multi-operation kernels
+- Always benchmark both approaches
+
+---
+
 ## Performance Targets
 
 ### Field Operations (Mersenne31, single core)
@@ -501,9 +611,29 @@ return F.reduce64(acc);  // Single reduction
 
 ### Phase 4: Optimizations
 
-- [ ] SIMD field operations
-- [ ] Multi-threading
-- [ ] GPU offload (compute shaders)
+**SIMD Field Operations:**
+- [x] `linearCombineBatch` - explicit SIMD (1.3-1.5x speedup)
+- [x] `sumSlices` - trust LLVM auto-vectorization (explicit SIMD was 4x slower)
+- [ ] `dotProduct` - fix overflow bug with partial reduction, then SIMD
+- [ ] Benchmark on x86 (AVX2/AVX-512) to validate cross-platform
+
+**Batched Sumcheck:**
+- [ ] `BatchedMultilinear(k)` struct with interleaved k-tuple layout
+- [ ] Batched `sumHalves` returning `[2][k]F`
+- [ ] Batched `bind` operating on all k polynomials
+- [ ] Horner's method for combining with α powers
+
+**Multi-threading:**
+- [ ] Static thread pool (avoid per-call allocation)
+- [ ] Parallel `sumSlices` with chunk partitioning
+- [ ] Parallel `linearCombineBatch` (bind)
+- [ ] Cache-line aligned chunk boundaries (64 bytes)
+- [ ] Benchmark scaling: 2, 4, 8 cores
+
+**GPU Offload (Future):**
+- [ ] Evaluate compute shaders vs CUDA
+- [ ] Identify crossover point (n=? where GPU wins)
+- [ ] Memory transfer overhead analysis
 
 ### Phase 5: Applications
 - [ ] Simple VM circuit

@@ -41,7 +41,7 @@ fn benchSize(comptime F: type, comptime num_vars: usize, allocator: std.mem.Allo
 
     const label_prefix = std.fmt.comptimePrint("n={d} ", .{num_vars});
 
-    // Wrap sum to match expected signature
+    // Sum - single slice (no interleaving difference)
     const SumWrapper = struct {
         fn call(e: []const F) F {
             return multilinear.sum(F, e);
@@ -57,7 +57,7 @@ fn benchSize(comptime F: type, comptime num_vars: usize, allocator: std.mem.Allo
         writer,
     );
 
-    // Wrap sumHalves to match expected signature
+    // sumHalves
     const SumHalvesWrapper = struct {
         fn call(e: []const F) [2]F {
             return multilinear.sumHalves(F, e);

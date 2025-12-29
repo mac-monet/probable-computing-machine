@@ -25,15 +25,8 @@ pub fn verify(comptime F: type) void {
     _ = @as(fn (F, F) F, F.mul);
     _ = @as(fn (F) F, F.neg);
 
-    // Batch arithmetic
-    _ = @as(fn ([]F, []const F, []const F) void, F.addBatch);
-    _ = @as(fn ([]F, []const F, []const F) void, F.mulBatch);
-    _ = @as(fn ([]F, []const F, []const F) void, F.subBatch);
-    _ = @as(fn ([]F, []const F, []const F, []const F) void, F.mulAddBatch);
+    // Batch operations
     _ = @as(fn ([]F, []const F, []const F, F) void, F.linearCombineBatch);
-
-    // Batch reductions
-    _ = @as(fn ([]const F) F, F.sumSlice);
     _ = @as(fn ([]const F, []const F) F, F.dotProduct);
 
     // Extended arithmetic
