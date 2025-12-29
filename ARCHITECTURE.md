@@ -5,6 +5,7 @@ A zero-knowledge proving library built on sumcheck protocols, designed for data-
 ## Vision
 
 libzero aims to be a competitive client-side prover by leveraging:
+
 - **Sumcheck-based IOPs** over NTT-heavy approaches for cache-friendly memory access
 - **Data-oriented design** principles throughout the stack
 - **Zig's low-level control** for explicit memory layout and SIMD optimization
@@ -13,25 +14,33 @@ libzero aims to be a competitive client-side prover by leveraging:
 ## Design Principles
 
 ### 1. Sequential Memory Access
+
 Random I/O is dramatically slower than sequential I/O. Every algorithm choice prioritizes linear memory traversal:
+
 - Sumcheck naturally halves data each round (sequential reads)
 - Avoid NTT butterfly patterns (strided access)
 - Process data in cache-line-sized blocks
 
 ### 2. Delayed Reduction
+
 Field arithmetic accumulates in wider integers, reducing only when necessary:
+
 - Sum millions of 31-bit elements in a 64-bit accumulator
 - Single reduction at the end instead of per-operation
 - Enables better instruction pipelining
 
 ### 3. Batch Over Scalar
+
 Operations work on slices, not individual elements:
+
 - `sumSlice`, `foldSlice` instead of element-by-element loops
 - Enables SIMD without changing call sites
 - Reduces function call overhead
 
 ### 4. Compile-Time Generics
+
 Monomorphization over runtime polymorphism:
+
 - `fn Sumcheck(comptime F: type)` generates specialized code per field
 - Zero vtable overhead
 - Enables field-specific optimizations
@@ -301,6 +310,7 @@ pub fn VirtualPoly(comptime F: type) type {
 ```
 
 This enables:
+
 - Memory efficiency (don't materialize product polynomials)
 - Lazy evaluation (compute only what's needed)
 - Composition (build complex constraints from simple parts)
@@ -349,9 +359,6 @@ libzero/
 │   │   ├── interface.zig        # Field trait definition
 │   │   ├── mersenne31.zig       # Primary field
 │   │   ├── goldilocks.zig       # Alternative field
-│   │   └── ops/
-│   │       ├── batch.zig        # Batch operations
-│   │       └── simd.zig         # SIMD implementations
 │   │
 │   ├── poly/
 │   │   ├── multilinear.zig      # MLE representation
@@ -410,7 +417,7 @@ for (elements) |e| {
 }
 
 // DOD: Batch operation
-result = F.sumSlice(elements);
+result = F.sumSlices(elements);
 ```
 
 ### Pattern 3: In-Place Mutation
@@ -456,6 +463,7 @@ return F.reduce64(acc);  // Single reduction
 When verifying multiple polynomial claims simultaneously, combine them into a single sumcheck:
 
 **Problem:** k separate claims require k × n rounds
+
 ```
 claim_1: Σ f_1(x) = c_1
 claim_2: Σ f_2(x) = c_2
@@ -464,6 +472,7 @@ claim_k: Σ f_k(x) = c_k
 ```
 
 **Solution:** Random linear combination into single claim
+
 ```
 Verifier sends random α
 Combined: Σ (f_1(x) + α·f_2(x) + α²·f_3(x) + ...) = c_1 + α·c_2 + α²·c_3 + ...
@@ -483,11 +492,13 @@ evals: [][k]Mersenne31   // 2^n groups of k elements
 ```
 
 **When to use:**
+
 - GKR protocol (multiple layer claims)
 - Batch verification (N proofs at once)
 - Multi-instance proofs (N executions of same circuit)
 
 **Trade-off with k:**
+
 - Small k (2-8): k-tuple fits in cache line, interleaved wins
 - Large k (100+): Tuple spans cache lines, separate buffers may be better
 
@@ -513,11 +524,13 @@ Sumcheck operations are embarrassingly parallel within each round:
 ```
 
 **Parallelizable operations:**
+
 - `sumSlices`: Each thread sums a chunk, combine at end
 - `linearCombineBatch` (bind): Each thread processes a range
 - `dotProduct`: Same pattern as sum
 
 **Implementation approach:**
+
 ```zig
 // Static thread pool (avoid allocation per call)
 const ThreadPool = struct {
@@ -531,11 +544,13 @@ const ThreadPool = struct {
 ```
 
 **Expected speedup:**
+
 - n=24 (16M elements): ~4x with 8 cores (memory-bound)
 - n=20 (1M elements): ~3x (starts fitting in L3)
 - n=16 (64K elements): ~2x (L3 cache, less parallelism benefit)
 
 **Memory considerations:**
+
 - Each thread needs its own accumulator (no contention)
 - Chunk boundaries should align to cache lines (64 bytes)
 - For batched sumcheck: partition by hypercube index, not by polynomial
@@ -553,6 +568,7 @@ From benchmarking on Apple Silicon:
 **Key insight:** Simple reductions (sum) are memory-bound and LLVM auto-vectorizes well. Complex arithmetic (multiply + reduce) benefits from explicit SIMD because compute hides memory latency.
 
 **Guidelines:**
+
 - Trust LLVM for simple loops (sum, copy)
 - Explicit SIMD for: multiply, field reduction, multi-operation kernels
 - Always benchmark both approaches
@@ -612,18 +628,21 @@ From benchmarking on Apple Silicon:
 ### Phase 4: Optimizations
 
 **SIMD Field Operations:**
+
 - [x] `linearCombineBatch` - explicit SIMD (1.3-1.5x speedup)
 - [x] `sumSlices` - trust LLVM auto-vectorization (explicit SIMD was 4x slower)
 - [ ] `dotProduct` - fix overflow bug with partial reduction, then SIMD
 - [ ] Benchmark on x86 (AVX2/AVX-512) to validate cross-platform
 
 **Batched Sumcheck:**
+
 - [ ] `BatchedMultilinear(k)` struct with interleaved k-tuple layout
 - [ ] Batched `sumHalves` returning `[2][k]F`
 - [ ] Batched `bind` operating on all k polynomials
 - [ ] Horner's method for combining with α powers
 
 **Multi-threading:**
+
 - [ ] Static thread pool (avoid per-call allocation)
 - [ ] Parallel `sumSlices` with chunk partitioning
 - [ ] Parallel `linearCombineBatch` (bind)
@@ -631,11 +650,13 @@ From benchmarking on Apple Silicon:
 - [ ] Benchmark scaling: 2, 4, 8 cores
 
 **GPU Offload (Future):**
+
 - [ ] Evaluate compute shaders vs CUDA
 - [ ] Identify crossover point (n=? where GPU wins)
 - [ ] Memory transfer overhead analysis
 
 ### Phase 5: Applications
+
 - [ ] Simple VM circuit
 - [ ] zkVM integration
 - [ ] DA layer piggybacking (Celestia)
@@ -655,6 +676,7 @@ From benchmarking on Apple Silicon:
 ## Contributing
 
 The hot paths are:
+
 1. `field/mersenne31.zig` - Field arithmetic
 2. `poly/multilinear.zig` - Polynomial operations
 3. `sumcheck/prover.zig` - Sumcheck rounds

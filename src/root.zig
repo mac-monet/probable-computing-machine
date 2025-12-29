@@ -24,4 +24,5 @@ test {
     // Import modules to include their tests
     _ = @import("fields/mersenne31.zig");
     _ = @import("poly/multilinear.zig");
+    _ = @import("sumcheck.zig");
 }
