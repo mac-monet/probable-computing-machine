@@ -1,5 +1,5 @@
 const std = @import("std");
-const field = @import("field.zig");
+const Field = @import("field.zig");
 
 /// Mersenne-31: p = 2^31 - 1
 pub const Mersenne31 = packed struct(u32) {
@@ -138,6 +138,7 @@ pub const Mersenne31 = packed struct(u32) {
     pub fn linearCombineBatch(dst: []Mersenne31, a: []const Mersenne31, b: []const Mersenne31, r: Mersenne31) void {
         std.debug.assert(dst.len == a.len and a.len == b.len);
 
+        // TODO
         const simd = @import("../simd.zig");
         const VEC_LEN = simd.u32_len orelse 4;
 
@@ -195,9 +196,9 @@ pub const Mersenne31 = packed struct(u32) {
 
     // ============ Derived Arithmetic ============ //
 
-    pub const square = field.defaults(Mersenne31).square;
-    pub const double = field.defaults(Mersenne31).double;
-    pub const pow = field.defaults(Mersenne31).pow;
+    pub const square = Field.defaults(Mersenne31).square;
+    pub const double = Field.defaults(Mersenne31).double;
+    pub const pow = Field.defaults(Mersenne31).pow;
 
     pub fn inv(a: Mersenne31) Mersenne31 {
         std.debug.assert(!a.isZero());
@@ -216,9 +217,9 @@ pub const Mersenne31 = packed struct(u32) {
         return @bitCast(std.mem.nativeToLittle(u32, normalized));
     }
 
-    pub fn fromBytes(bytes: [ENCODED_SIZE]u8) field.FieldError!Mersenne31 {
+    pub fn fromBytes(bytes: [ENCODED_SIZE]u8) Field.FieldError!Mersenne31 {
         const value = std.mem.littleToNative(u32, @bitCast(bytes));
-        if (value >= MODULUS) return field.FieldError.InvalidValue;
+        if (value >= MODULUS) return Field.FieldError.InvalidValue;
         return .{ .value = value };
     }
 
@@ -304,8 +305,8 @@ pub const Mersenne31 = packed struct(u32) {
 
 // Interface and generic tests
 comptime {
-    field.verify(Mersenne31);
-    _ = field.tests(Mersenne31);
+    Field.verify(Mersenne31);
+    _ = Field.tests(Mersenne31);
 
     // Verify packed struct layout for SIMD compatibility
     std.debug.assert(@sizeOf(Mersenne31) == 4);
@@ -441,15 +442,15 @@ test "fromU64 edge cases" {
 test "fromBytes rejects invalid values" {
     // p itself should be rejected
     const invalid_bytes: [4]u8 = @bitCast(std.mem.nativeToLittle(u32, Mersenne31.MODULUS));
-    try std.testing.expectError(field.FieldError.InvalidValue, Mersenne31.fromBytes(invalid_bytes));
+    try std.testing.expectError(Field.FieldError.InvalidValue, Mersenne31.fromBytes(invalid_bytes));
 
     // p+1 should be rejected
     const invalid_bytes2: [4]u8 = @bitCast(std.mem.nativeToLittle(u32, Mersenne31.MODULUS + 1));
-    try std.testing.expectError(field.FieldError.InvalidValue, Mersenne31.fromBytes(invalid_bytes2));
+    try std.testing.expectError(Field.FieldError.InvalidValue, Mersenne31.fromBytes(invalid_bytes2));
 
     // max u32 should be rejected
     const invalid_bytes3: [4]u8 = @bitCast(std.mem.nativeToLittle(u32, std.math.maxInt(u32)));
-    try std.testing.expectError(field.FieldError.InvalidValue, Mersenne31.fromBytes(invalid_bytes3));
+    try std.testing.expectError(Field.FieldError.InvalidValue, Mersenne31.fromBytes(invalid_bytes3));
 }
 
 // ============ Batch Operation Tests ============ //
