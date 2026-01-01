@@ -26,4 +26,6 @@ test {
     _ = @import("poly/multilinear.zig");
     _ = @import("sumcheck.zig");
     _ = @import("transcript.zig");
+    _ = @import("merkle.zig");
+    _ = @import("protocol.zig");
 }

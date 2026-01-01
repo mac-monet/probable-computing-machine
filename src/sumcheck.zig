@@ -45,14 +45,12 @@ pub fn Sumcheck(comptime F: type) type {
             return current[0];
         }
 
-        pub fn verify(
-            claimed_sum: F,
-            rounds: []const RoundPoly,
-            transcript: *Transcript(F),
-        ) VerifyError!F {
+        pub fn verify(claimed_sum: F, rounds: []const RoundPoly, transcript: *Transcript(F), challenges_out: []F) VerifyError!F {
+            std.debug.assert(rounds.len == challenges_out.len);
+
             var current_claim = claimed_sum;
 
-            for (rounds) |round| {
+            for (rounds, 0..) |round, i| {
                 // Absorb round polynomials (same as prover)
                 transcript.absorb(round.eval_0);
                 transcript.absorb(round.eval_1);
@@ -62,6 +60,7 @@ pub fn Sumcheck(comptime F: type) type {
                     return error.RoundSumMismatch;
                 }
                 const c = transcript.squeeze();
+                challenges_out[i] = c;
 
                 // Update claim for next round
                 current_claim = round.evaluate(c);
@@ -91,7 +90,8 @@ test "Sumcheck prove and verify with transcript" {
 
     // Verifier (fresh transcript, same domain)
     var verifier_transcript = Transcript(M31).init("sumcheck-test");
-    const expected_eval = try Sumcheck(M31).verify(claimed_sum, &rounds, &verifier_transcript);
+    var challenges: [2]M31 = undefined;
+    const expected_eval = try Sumcheck(M31).verify(claimed_sum, &rounds, &verifier_transcript, &challenges);
 
     try std.testing.expect(final_eval.eql(expected_eval));
 }
@@ -110,7 +110,8 @@ test "sumcheck verification fails on bad claim" {
     _ = Sumcheck(M31).prove(&evals, &rounds, &prover_transcript);
 
     var verifier_transcript = Transcript(M31).init("sumcheck-test");
-    const result = Sumcheck(M31).verify(wrong_sum, &rounds, &verifier_transcript);
+    var challenges: [2]M31 = undefined;
+    const result = Sumcheck(M31).verify(wrong_sum, &rounds, &verifier_transcript, &challenges);
 
     try std.testing.expectError(Sumcheck(M31).VerifyError.RoundSumMismatch, result);
 }
@@ -132,7 +133,8 @@ test "sumcheck verification fails on tampered round" {
     rounds[1].eval_0 = M31.fromU64(999);
 
     var verifier_transcript = Transcript(M31).init("sumcheck-test");
-    const result = Sumcheck(M31).verify(claimed_sum, &rounds, &verifier_transcript);
+    var challenges: [2]M31 = undefined;
+    const result = Sumcheck(M31).verify(claimed_sum, &rounds, &verifier_transcript, &challenges);
 
     try std.testing.expectError(Sumcheck(M31).VerifyError.RoundSumMismatch, result);
 }
