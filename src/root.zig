@@ -7,6 +7,10 @@ pub const Mersenne31 = @import("fields/mersenne31.zig").Mersenne31;
 // Re-export polynomial modules
 pub const multilinear = @import("poly/multilinear.zig");
 
+// Re-export protocols
+pub const Sumcheck = @import("sumcheck.zig").Sumcheck;
+pub const Transcript = @import("transcript.zig").Transcript;
+
 pub fn bufferedPrint() !void {
     // Stdout is for the actual output of your application, for example if you
     // are implementing gzip, then only the compressed bytes should be sent to
