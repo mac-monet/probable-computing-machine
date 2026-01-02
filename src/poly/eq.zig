@@ -20,7 +20,7 @@ pub fn eqEval(comptime F: type, b_index: usize, r: []const F) F {
     return result;
 }
 
-/// Build eq(b , r) for all b in {0,1}^n
+/// Build eq(b,r) for all b in {0,1}^n
 pub fn eqEvals(comptime F: type, r: []const F, dst: []F) void {
     std.debug.assert(dst.len == @as(usize, 1) << @intCast(r.len));
 
@@ -42,10 +42,24 @@ pub fn eqEvals(comptime F: type, r: []const F, dst: []F) void {
     }
 }
 
+/// Compute eq(a, b) where both a and b are field element vectors
+/// eq(a, b) = Π_i [a_i·b_i + (1-a_i)(1-b_i)]
+pub fn eqEvalField(comptime F: type, a: []const F, b: []const F) F {
+    std.debug.assert(a.len == b.len);
+    var result = F.one;
+    for (a, b) |a_i, b_i| {
+        // term = a_i·b_i + (1-a_i)(1-b_i)
+        const prod = a_i.mul(b_i);
+        const complement = F.one.sub(a_i).mul(F.one.sub(b_i));
+        result = result.mul(prod.add(complement));
+    }
+    return result;
+}
+
 // Testing
 
-const M31 = @import("fields/mersenne31.zig").Mersenne31;
-const multilinear = @import("poly/multilinear.zig");
+const M31 = @import("../fields/mersenne31.zig").Mersenne31;
+const multilinear = @import("multilinear.zig");
 
 test "eq at boolean points" {
     // eq(b, b) = 1 for boolean b

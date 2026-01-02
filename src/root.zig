@@ -28,9 +28,11 @@ test {
     // Import modules to include their tests
     _ = @import("fields/mersenne31.zig");
     _ = @import("poly/multilinear.zig");
+    _ = @import("poly/eq.zig");
     _ = @import("sumcheck.zig");
-    _ = @import("eq.zig");
+    _ = @import("product_sumcheck.zig");
     _ = @import("transcript.zig");
     _ = @import("merkle.zig");
     _ = @import("protocol.zig");
+    _ = @import("pcs/basefold.zig");
 }
