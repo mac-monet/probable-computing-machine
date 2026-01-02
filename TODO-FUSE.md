@@ -44,41 +44,123 @@ for (challenges, rounds) |c, *round| {
 
 ## Implementation Steps
 
-### Step 1: Add `sumHalvesAndBind` to multilinear.zig
+### Step 1a: Add `sumAndLinearCombineBatch` to mersenne31.zig
+
+Keep all SIMD isolated in the field implementation:
+
+**Aliasing note**: `dst` and `a` point to the same memory (`evals[0..half]`). This is safe
+because we read `a[i]` before writing `dst[i]`. If we wrote first, subsequent reads of `a[i]`
+would return the new value, not the original. The load-before-store order preserves zero-copy
+in-place updates.
+
+```zig
+/// Fused sum + linear combine: accumulates sums while computing dst[i] = a[i] + r * (b[i] - a[i])
+/// Returns [sum_a, sum_b] for the round polynomial.
+/// All SIMD logic lives here, keeping multilinear.zig generic.
+///
+/// IMPORTANT: dst and a may alias (point to same memory). This is safe because
+/// each element is read before being written. Do not reorder loads/stores.
+pub fn sumAndLinearCombineBatch(
+    dst: []Mersenne31,         // output, may alias a
+    a: []const Mersenne31,     // first half (read before write)
+    b: []const Mersenne31,     // second half
+    r: Mersenne31,
+) [2]Mersenne31 {
+    std.debug.assert(dst.len == a.len and a.len == b.len);
+
+    const simd = @import("../simd.zig");
+    const VEC_LEN = simd.u32_len orelse 4;
+    const VecU64 = @Vector(VEC_LEN, u64);
+
+    const len = dst.len;
+    const r_val: u64 = r.value;
+
+    // Vector accumulators - horizontal sum only at the end
+    var acc_a: VecU64 = @splat(0);
+    var acc_b: VecU64 = @splat(0);
+
+    var i: usize = 0;
+    while (i + VEC_LEN <= len) : (i += VEC_LEN) {
+        const result = sumAndLinearCombineChunk(VEC_LEN,
+            dst[i..][0..VEC_LEN],
+            a[i..][0..VEC_LEN],
+            b[i..][0..VEC_LEN],
+            r_val);
+        acc_a +%= result.sum_a;
+        acc_b +%= result.sum_b;
+    }
+
+    // Horizontal sum of vector accumulators
+    var scalar_sum_a: u64 = @reduce(.Add, acc_a);
+    var scalar_sum_b: u64 = @reduce(.Add, acc_b);
+
+    // Tail loop: remaining elements
+    while (i < len) : (i += 1) {
+        scalar_sum_a +%= a[i].value;
+        scalar_sum_b +%= b[i].value;
+        const diff: u64 = @as(u64, b[i].value) +% MODULUS -% a[i].value;
+        const prod = r_val *% diff;
+        dst[i] = reduce64(@as(u64, a[i].value) +% prod);
+    }
+
+    return .{ reduce64(scalar_sum_a), reduce64(scalar_sum_b) };
+}
+
+/// Process one chunk: accumulate sums AND compute linear combination.
+/// Load-before-store order is critical for aliasing safety.
+inline fn sumAndLinearCombineChunk(
+    comptime VEC_LEN: comptime_int,
+    dst: *[VEC_LEN]Mersenne31,
+    a: *const [VEC_LEN]Mersenne31,
+    b: *const [VEC_LEN]Mersenne31,
+    r_val: u64,
+) struct { sum_a: @Vector(VEC_LEN, u64), sum_b: @Vector(VEC_LEN, u64) } {
+    const VecU32 = @Vector(VEC_LEN, u32);
+    const VecU64 = @Vector(VEC_LEN, u64);
+
+    // LOAD FIRST: read a and b before any writes (dst may alias a)
+    const a_vec: VecU32 = @bitCast(a.*);
+    const b_vec: VecU32 = @bitCast(b.*);
+
+    // Widen for accumulation (no reduction needed yet)
+    const a_wide: VecU64 = a_vec;
+    const b_wide: VecU64 = b_vec;
+
+    // Compute diff and bind: dst = a + r * (b - a)
+    const modulus_vec: VecU32 = @splat(MODULUS);
+    const diff_vec: VecU32 = b_vec +% modulus_vec -% a_vec;
+    const diff_wide: VecU64 = diff_vec;
+    const r_vec: VecU64 = @splat(r_val);
+    const prod: VecU64 = r_vec *% diff_wide;
+    const result: VecU64 = a_wide +% prod;
+
+    // STORE AFTER: write only after all reads complete
+    dst.* = @bitCast(reduce64Vec(VEC_LEN, result));
+
+    // Return original values (captured before the write)
+    return .{ .sum_a = a_wide, .sum_b = b_wide };
+}
+```
+
+### Step 1b: Add `sumHalvesAndBind` to multilinear.zig
+
+The multilinear layer stays SIMD-free, delegating to the field:
 
 ```zig
 /// Fused operation: compute round polynomial AND bind in single pass.
 /// Returns sums for round polynomial and the bound slice.
-pub fn sumHalvesAndBind(comptime F: type, evals: []F, r: F) struct {
-    sums: [2]F,
-    bound: []F
-} {
+pub fn sumHalvesAndBind(comptime F: type, evals: []F, r: F) struct { sums: [2]F, bound: []F } {
+    std.debug.assert(evals.len >= 2);
     const half = evals.len / 2;
 
-    // SIMD-friendly single pass
-    var sum_lo: u64 = 0;
-    var sum_hi: u64 = 0;
+    // Delegate to field's fused batch operation (SIMD lives there)
+    const sums = F.sumAndLinearCombineBatch(evals[0..half], evals[0..half], evals[half..], r);
 
-    for (0..half) |i| {
-        const lo = evals[i];
-        const hi = evals[i + half];
-
-        // Accumulate sums
-        sum_lo += lo.value;
-        sum_hi += hi.value;
-
-        // Compute bound value: lo + r * (hi - lo)
-        evals[i] = lo.add(r.mul(hi.sub(lo)));
-    }
-
-    return .{
-        .sums = .{ F.reduce64(sum_lo), F.reduce64(sum_hi) },
-        .bound = evals[0..half],
-    };
+    return .{ .sums = sums, .bound = evals[0..half] };
 }
 ```
 
-**SIMD version**: Process in chunks, accumulate sums in vector registers, apply bind in same loop.
+This mirrors the existing pattern: `sumHalves` calls `F.sumSlices`, `bind` calls `F.linearCombineBatch`.
 
 ### Step 2: Add commitment interface
 
@@ -150,6 +232,104 @@ For memory-bound workloads:
 Current n=24 prove: ~12.7 ms
 Expected n=24 prove: ~8-9 ms
 
+## Post-Fusion Optimizations
+
+After implementing the fused algorithm, these additional single-threaded optimizations can be layered on:
+
+### 1. Software Prefetching (Medium Impact)
+
+The fused operation reads from two locations 32MB apart (for n=24). Prefetch both streams to hide memory latency:
+
+```zig
+const PREFETCH_DISTANCE = 16;  // Cache lines ahead (~1KB)
+
+while (i + VEC_LEN <= len) : (i += VEC_LEN) {
+    // Prefetch future data from both halves
+    if (i + PREFETCH_DISTANCE * VEC_LEN < len) {
+        @prefetch(a.ptr + i + PREFETCH_DISTANCE * VEC_LEN, .{ .rw = .read, .locality = 3 });
+        @prefetch(b.ptr + i + PREFETCH_DISTANCE * VEC_LEN, .{ .rw = .read, .locality = 3 });
+    }
+
+    // Process current chunk...
+}
+```
+
+### 2. Non-Temporal Stores (Small-Medium Impact)
+
+After bind, written values won't be read until the next round (when they'll be cache-cold anyway). Streaming stores bypass cache pollution:
+
+```zig
+// Use non-temporal store hint (locality=0)
+@prefetch(dst.ptr + i, .{ .rw = .write, .locality = 0 });
+dst.* = @bitCast(reduce64Vec(VEC_LEN, result));
+```
+
+On x86 this can emit `movntdq`; on ARM it affects cache behavior.
+
+### 3. Multiple Accumulators (Medium Impact)
+
+Hide accumulator dependency latency with independent accumulators:
+
+```zig
+// Instead of 1 accumulator pair
+var acc_a_0: VecU64 = @splat(0);
+var acc_a_1: VecU64 = @splat(0);
+var acc_b_0: VecU64 = @splat(0);
+var acc_b_1: VecU64 = @splat(0);
+
+while (i + 2 * VEC_LEN <= len) : (i += 2 * VEC_LEN) {
+    // Iteration A - uses acc_*_0
+    const r0 = sumAndLinearCombineChunk(...);
+    acc_a_0 +%= r0.sum_a;
+    acc_b_0 +%= r0.sum_b;
+
+    // Iteration B - uses acc_*_1 (independent chain)
+    const r1 = sumAndLinearCombineChunk(...);
+    acc_a_1 +%= r1.sum_a;
+    acc_b_1 +%= r1.sum_b;
+}
+
+// Combine at end
+const sum_a = @reduce(.Add, acc_a_0) + @reduce(.Add, acc_a_1);
+const sum_b = @reduce(.Add, acc_b_0) + @reduce(.Add, acc_b_1);
+```
+
+### 4. Loop Unrolling
+
+Process multiple chunks per iteration to reduce loop overhead:
+
+```zig
+// Unroll 4x
+while (i + 4 * VEC_LEN <= len) : (i += 4 * VEC_LEN) {
+    inline for (0..4) |j| {
+        const offset = i + j * VEC_LEN;
+        const result = sumAndLinearCombineChunk(...);
+        // accumulate...
+    }
+}
+```
+
+### Optimization Priority
+
+| Optimization | Effort | Expected Gain | Notes |
+|--------------|--------|---------------|-------|
+| Fusion (Steps 1-3) | Medium | ~33% | Foundation - do first |
+| SIMD fused loop | Medium | 2-4x vs scalar | Already in Step 1a |
+| Prefetching | Low | 10-20% for n=24 | Hides RAM latency |
+| Multiple accumulators | Low | 5-15% | Better ILP |
+| Non-temporal stores | Low | 5-10% | Reduces cache pressure |
+| Loop unrolling | Low | 0-5% | May help or hurt |
+
+### Projected Final Performance
+
+| Stage | n=24 Time | Throughput |
+|-------|-----------|------------|
+| Current (2-pass) | 12.7 ms | 21.0 GB/s |
+| After fusion | ~8-9 ms | ~28-32 GB/s |
+| + Prefetch/NT stores | ~7-8 ms | ~32-36 GB/s |
+
+Memory bandwidth limit on M-series: ~100 GB/s. With fusion reading ~96MB total per round × 24 rounds = 2.3GB, theoretical minimum is ~23ms... but we're processing less due to halving each round. Actual data touched is ~192MB (geometric series), so ~2ms at peak bandwidth. Real gains limited by memory latency, not bandwidth.
+
 ## PCS Compatibility
 
 This optimization requires commit-then-challenge. Compatible schemes:
@@ -193,9 +373,16 @@ This optimization requires commit-then-challenge. Compatible schemes:
 
 4. **Basefold integration**: Basefold uses sumcheck internally — would this create a recursive optimization opportunity?
 
+5. **Threading strategy**: With known challenges, each round can be parallelized internally:
+   - Split data into L2-sized chunks across threads
+   - Each thread computes partial sums + binds its chunk
+   - Reduce partial sums at end of each round
+   - Combines well with prefetching (each thread prefetches its own stream)
+
 ## Files to Modify
 
-- [ ] `src/poly/multilinear.zig` — add `sumHalvesAndBind`
+- [ ] `src/fields/mersenne31.zig` — add `sumAndLinearCombineBatch` (SIMD fused operation)
+- [ ] `src/poly/multilinear.zig` — add `sumHalvesAndBind` (delegates to field)
 - [ ] `src/sumcheck.zig` — add `proveWithChallenges`
 - [ ] `src/commit.zig` — new file, commitment interface
 - [ ] `bench/sumcheck.zig` — benchmark fused vs standard

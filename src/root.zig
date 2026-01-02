@@ -29,6 +29,7 @@ test {
     _ = @import("fields/mersenne31.zig");
     _ = @import("poly/multilinear.zig");
     _ = @import("sumcheck.zig");
+    _ = @import("eq.zig");
     _ = @import("transcript.zig");
     _ = @import("merkle.zig");
     _ = @import("protocol.zig");
