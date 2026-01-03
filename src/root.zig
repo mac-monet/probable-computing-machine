@@ -15,6 +15,9 @@ pub const Transcript = @import("transcript.zig").Transcript;
 pub const vm = struct {
     pub const stack = @import("vm/stack.zig");
     pub const trace = @import("vm/trace.zig");
+    pub const constraints = @import("vm/constraints.zig");
+    pub const prover = @import("vm/prover.zig");
+    pub const verifier = @import("vm/verifier.zig");
 };
 
 pub fn bufferedPrint() !void {
@@ -43,4 +46,8 @@ test {
     _ = @import("pcs/basefold.zig");
     _ = @import("vm/stack.zig");
     _ = @import("vm/trace.zig");
+    _ = @import("vm/constraints.zig");
+    _ = @import("vm/prover.zig");
+    _ = @import("vm/verifier.zig");
+    _ = @import("vm/proof_test.zig");
 }
