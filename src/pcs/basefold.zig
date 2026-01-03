@@ -1,138 +1,421 @@
 const std = @import("std");
-const Merkle = @import("../merkle.zig");
-const Transcript = @import("../transcript.zig").Transcript;
-const Multilinear = @import("../poly/multilinear.zig");
-const Eq = @import("../poly/eq.zig");
-const ProductSumcheck = @import("../product_sumcheck.zig").ProductSumcheck;
 
 pub fn Basefold(comptime F: type) type {
-    const product = ProductSumcheck(F);
-    const merkle = Merkle.MerkleTree(F);
+    const ProductSC = @import("../product_sumcheck.zig").ProductSumcheck(F);
+    const Merkle = @import("../merkle.zig").MerkleTree(F);
+    const Transcript = @import("../transcript.zig").Transcript;
+    const multilinear = @import("../poly/multilinear.zig");
+    const eq = @import("../poly/eq.zig");
 
     return struct {
-        pub const Commitment = merkle.Commitment;
+        const Self = @This();
 
-        pub const Proof = struct {
-            rounds: []const product.RoundPoly2,
-            commitments: []const Commitment, // commitment[i] = folded poly after round i
-            final_f: F,
-            final_eq: F,
+        pub const Commitment = Merkle.Commitment;
+        pub const MerkleProof = Merkle.MerkleProof;
+
+        pub const Config = struct {
+            num_queries: usize = 32,
         };
 
-        pub fn prove(allocator: std.mem.Allocator, f_evals: []F, eq_evals: []F, num_vars: usize, transcript: *Transcript(F)) !Proof {
-            const rounds = try allocator.alloc(product.RoundPoly2, num_vars);
-            const commitments = try allocator.alloc(Commitment, num_vars);
+        pub const LayerProof = struct {
+            left_value: F,
+            right_value: F,
+            left_merkle: MerkleProof,
+            right_merkle: MerkleProof,
+        };
 
-            var f_current = f_evals;
-            var eq_current = eq_evals;
+        pub const QueryProof = struct {
+            layers: []const LayerProof,
+        };
+
+        pub const Proof = struct {
+            rounds: []const ProductSC.RoundPoly2,
+            commitments: []const Commitment,
+            final_f: F,
+            final_eq: F,
+            queries: []const QueryProof,
+
+            pub fn deinit(self: *const Proof, allocator: std.mem.Allocator) void {
+                for (self.queries) |query| {
+                    for (query.layers) |layer| {
+                        allocator.free(layer.left_merkle.path);
+                        allocator.free(layer.left_merkle.indices);
+                        allocator.free(layer.right_merkle.path);
+                        allocator.free(layer.right_merkle.indices);
+                    }
+                    allocator.free(query.layers);
+                }
+                allocator.free(self.queries);
+                allocator.free(self.rounds);
+                allocator.free(self.commitments);
+            }
+        };
+
+        /// Prover state - internal, holds layers for query generation
+        const ProverState = struct {
+            layers: [][]F,
+            commitments: []Commitment,
+            rounds: []ProductSC.RoundPoly2,
+            final_f: F,
+            final_eq: F,
+            allocator: std.mem.Allocator,
+
+            fn deinit(self: *ProverState) void {
+                for (self.layers) |layer| {
+                    self.allocator.free(layer);
+                }
+                self.allocator.free(self.layers);
+                self.allocator.free(self.commitments);
+                self.allocator.free(self.rounds);
+            }
+        };
+
+        // ============ Public API ============ //
+
+        /// Prove that f(r) = claimed_value
+        /// f_evals: evaluations of f over {0,1}^n
+        /// r: the opening point
+        pub fn prove(
+            allocator: std.mem.Allocator,
+            f_evals: []const F,
+            r: []const F,
+            config: Config,
+        ) !Proof {
+            const num_vars = r.len;
+            std.debug.assert(f_evals.len == @as(usize, 1) << @intCast(num_vars));
+
+            var transcript = Transcript(F).init("basefold");
+
+            // Build eq table
+            const eq_evals = try allocator.alloc(F, f_evals.len);
+            defer allocator.free(eq_evals);
+            eq.eqEvals(F, r, eq_evals);
+
+            // Phase 1: commit and run sumcheck
+            var state = try runSumcheck(allocator, f_evals, eq_evals, num_vars, &transcript);
+            defer state.deinit();
+
+            // Derive query indices from transcript
+            const max_index = @as(usize, 1) << @intCast(num_vars - 1);
+            const query_indices = try deriveQueryIndices(&transcript, config.num_queries, max_index, allocator);
+            defer allocator.free(query_indices);
+
+            // Phase 2: generate query proofs
+            const queries = try generateQueryProofs(&state, query_indices, allocator);
+
+            // Copy state data into proof (state will be freed)
+            const rounds = try allocator.alloc(ProductSC.RoundPoly2, num_vars);
+            @memcpy(rounds, state.rounds);
+
+            const commitments = try allocator.alloc(Commitment, num_vars);
+            @memcpy(commitments, state.commitments);
+
+            return .{
+                .rounds = rounds,
+                .commitments = commitments,
+                .final_f = state.final_f,
+                .final_eq = state.final_eq,
+                .queries = queries,
+            };
+        }
+
+        /// Verify a Basefold proof
+        pub fn verify(
+            allocator: std.mem.Allocator,
+            claimed_value: F,
+            r: []const F,
+            proof: *const Proof,
+            config: Config,
+        ) !bool {
+            const num_vars = proof.commitments.len;
+            if (r.len != num_vars) return false;
+
+            var transcript = Transcript(F).init("basefold");
+
+            // Phase 1: verify sumcheck
+            const challenges = try allocator.alloc(F, num_vars);
+            defer allocator.free(challenges);
+
+            const final_claim = verifySumcheck(claimed_value, proof, &transcript, challenges) catch return false;
+
+            // Check final_eq matches eq(challenges, r)
+            const eq_at_c = eq.eqEvalField(F, challenges, r);
+            if (!proof.final_eq.eql(eq_at_c)) return false;
+
+            // Check final_claim = final_f * final_eq
+            if (!final_claim.eql(proof.final_f.mul(proof.final_eq))) return false;
+
+            // Derive query indices (same as prover)
+            const max_index = @as(usize, 1) << @intCast(num_vars - 1);
+            const query_indices = try deriveQueryIndices(&transcript, config.num_queries, max_index, allocator);
+            defer allocator.free(query_indices);
+
+            // Phase 2: verify query proofs
+            return verifyQueries(proof, query_indices, challenges);
+        }
+
+        // ============ Internal: Sumcheck ============ //
+
+        fn runSumcheck(
+            allocator: std.mem.Allocator,
+            f_evals: []const F,
+            eq_evals_in: []F,
+            num_vars: usize,
+            transcript: *Transcript(F),
+        ) !ProverState {
+            const rounds = try allocator.alloc(ProductSC.RoundPoly2, num_vars);
+            const commitments = try allocator.alloc(Commitment, num_vars);
+            const layers = try allocator.alloc([]F, num_vars);
+
+            // Copy initial f_evals
+            var current_f = try allocator.alloc(F, f_evals.len);
+            @memcpy(current_f, f_evals);
+            var current_eq = eq_evals_in;
 
             for (0..num_vars) |i| {
-                // Commit to current f
-                commitments[i] = merkle.commit(f_current);
+                // Save layer
+                layers[i] = current_f;
 
+                // Commit and absorb
+                commitments[i] = Merkle.commit(current_f);
                 transcript.absorbBytes(&commitments[i]);
 
-                // Compute round poly
-                rounds[i] = product.computeRound(f_current, eq_current);
-
+                // Round polynomial
+                rounds[i] = ProductSC.computeRound(current_f, current_eq);
                 transcript.absorb(rounds[i].eval_0);
                 transcript.absorb(rounds[i].eval_1);
                 transcript.absorb(rounds[i].eval_2);
 
-                // TODO for now, use deterministic challenge (will add transcript later)
+                // Challenge
                 const challenge = transcript.squeeze();
 
-                // Fold both
-                f_current = Multilinear.bind(F, f_current, challenge);
-                eq_current = Multilinear.bind(F, eq_current, challenge);
+                // Fold f into new buffer
+                const next_size = current_f.len / 2;
+                const next_f = try allocator.alloc(F, next_size);
+                for (0..next_size) |j| {
+                    const lo = current_f[j];
+                    const hi = current_f[j + next_size];
+                    next_f[j] = lo.add(challenge.mul(hi.sub(lo)));
+                }
+                current_f = next_f;
+
+                // Fold eq in place
+                current_eq = multilinear.bind(F, current_eq, challenge);
             }
 
-            return Proof{
-                .rounds = rounds,
+            const final_f = current_f[0];
+            const final_eq = current_eq[0];
+            allocator.free(current_f);
+
+            return .{
+                .layers = layers,
                 .commitments = commitments,
-                .final_f = f_current[0],
-                .final_eq = eq_current[0],
+                .rounds = rounds,
+                .final_f = final_f,
+                .final_eq = final_eq,
+                .allocator = allocator,
             };
         }
 
-        /// Verifier: check sumcheck rounds (phase 1, before query phase)
-        pub fn verify(
+        fn verifySumcheck(
             claimed_value: F,
             proof: *const Proof,
-            r: []const F,
             transcript: *Transcript(F),
             challenges_out: []F,
-        ) product.VerifyError!F {
-            std.debug.assert(proof.rounds.len == challenges_out.len);
-            std.debug.assert(proof.rounds.len == r.len);
-
+        ) !F {
             var current_claim = claimed_value;
 
             for (proof.rounds, proof.commitments, 0..) |round, commitment, i| {
-                // Absorb commitment (same as prover)
+                // Absorb (same order as prover)
                 transcript.absorbBytes(&commitment);
-
-                // Absorb round polynomial
                 transcript.absorb(round.eval_0);
                 transcript.absorb(round.eval_1);
                 transcript.absorb(round.eval_2);
 
-                // Check: g(0) + g(1) = current_claim
+                // Check g(0) + g(1) = current_claim
                 if (!round.eval_0.add(round.eval_1).eql(current_claim)) {
                     return error.RoundSumMismatch;
                 }
 
+                // Challenge
                 const challenge = transcript.squeeze();
                 challenges_out[i] = challenge;
 
-                // Update claim: g(challenge)
+                // Next claim
                 current_claim = round.evaluate(challenge);
             }
 
             return current_claim;
         }
+
+        // ============ Internal: Query Phase ============ //
+
+        fn deriveQueryIndices(
+            transcript: *Transcript(F),
+            num_queries: usize,
+            max_index: usize,
+            allocator: std.mem.Allocator,
+        ) ![]usize {
+            var indices = try allocator.alloc(usize, num_queries);
+            for (0..num_queries) |i| {
+                const challenge = transcript.squeeze();
+                indices[i] = challenge.value % max_index;
+            }
+            return indices;
+        }
+
+        fn generateQueryProofs(
+            state: *const ProverState,
+            query_indices: []const usize,
+            allocator: std.mem.Allocator,
+        ) ![]QueryProof {
+            const num_vars = state.layers.len;
+            var queries = try allocator.alloc(QueryProof, query_indices.len);
+
+            for (query_indices, 0..) |q, qi| {
+                var layer_proofs = try allocator.alloc(LayerProof, num_vars);
+
+                for (0..num_vars) |i| {
+                    const layer = state.layers[i];
+                    const half = layer.len / 2;
+                    const idx = q % half;
+
+                    const left_opening = try Merkle.open(layer, idx, allocator);
+                    const right_opening = try Merkle.open(layer, idx + half, allocator);
+
+                    layer_proofs[i] = .{
+                        .left_value = left_opening.value,
+                        .right_value = right_opening.value,
+                        .left_merkle = left_opening.proof,
+                        .right_merkle = right_opening.proof,
+                    };
+                }
+
+                queries[qi] = .{ .layers = layer_proofs };
+            }
+
+            return queries;
+        }
+
+        fn verifyQueries(
+            proof: *const Proof,
+            query_indices: []const usize,
+            challenges: []const F,
+        ) bool {
+            const num_vars = proof.commitments.len;
+
+            for (proof.queries, query_indices) |query, initial_q| {
+                var expected_next: ?F = null;
+                var current_idx = initial_q;
+
+                for (0..num_vars) |i| {
+                    const layer_proof = query.layers[i];
+                    const commitment = proof.commitments[i];
+                    const half = @as(usize, 1) << @intCast(num_vars - 1 - i);
+                    const idx = current_idx % half;
+
+                    // Verify Merkle openings
+                    if (!Merkle.verifyOpening(commitment, idx, layer_proof.left_value, layer_proof.left_merkle)) {
+                        return false;
+                    }
+                    if (!Merkle.verifyOpening(commitment, idx + half, layer_proof.right_value, layer_proof.right_merkle)) {
+                        return false;
+                    }
+
+                    // Check folding from previous layer
+                    // If current_idx >= half, the folded value is at right position, else at left
+                    if (expected_next) |exp| {
+                        const value_to_check = if (current_idx >= half) layer_proof.right_value else layer_proof.left_value;
+                        if (!value_to_check.eql(exp)) {
+                            return false;
+                        }
+                    }
+
+                    // Compute expected next
+                    const lo = layer_proof.left_value;
+                    const hi = layer_proof.right_value;
+                    expected_next = lo.add(challenges[i].mul(hi.sub(lo)));
+
+                    // Update index for next layer
+                    current_idx = idx;
+                }
+
+                // Final fold should equal final_f
+                if (expected_next) |exp| {
+                    if (!exp.eql(proof.final_f)) {
+                        return false;
+                    }
+                }
+            }
+
+            return true;
+        }
     };
 }
 
-const M31 = @import("../fields/mersenne31.zig").Mersenne31;
-const basefold = @import("basefold.zig").Basefold(M31);
-const eq = @import("../poly/eq.zig");
+// ============ Tests ============ //
 
-test "basefold prove/verify sumcheck" {
+test "basefold prove and verify" {
+    const M31 = @import("../fields/mersenne31.zig").Mersenne31;
+    const BasefoldM31 = Basefold(M31);
+    const eqMod = @import("../poly/eq.zig");
+
     const allocator = std.testing.allocator;
 
-    var f_evals = [_]M31{
+    const f_evals = [_]M31{
         M31.fromU64(1), M31.fromU64(2), M31.fromU64(3), M31.fromU64(4),
         M31.fromU64(5), M31.fromU64(6), M31.fromU64(7), M31.fromU64(8),
     };
-    const num_vars = 3;
 
     const r = [_]M31{ M31.fromU64(10), M31.fromU64(20), M31.fromU64(30) };
 
+    // Compute claimed value
     var eq_evals: [8]M31 = undefined;
-    eq.eqEvals(M31, &r, &eq_evals);
-
-    // Compute claimed value: f(r)
+    eqMod.eqEvals(M31, &r, &eq_evals);
     var claimed_value = M31.zero;
     for (f_evals, eq_evals) |f, e| {
         claimed_value = claimed_value.add(f.mul(e));
     }
 
-    // Prover
-    var prover_transcript = Transcript(M31).init("basefold");
-    const proof = try basefold.prove(allocator, &f_evals, &eq_evals, num_vars, &prover_transcript);
-    defer allocator.free(proof.rounds);
-    defer allocator.free(proof.commitments);
+    // Prove
+    const config = BasefoldM31.Config{ .num_queries = 4 };
+    const proof = try BasefoldM31.prove(allocator, &f_evals, &r, config);
+    defer proof.deinit(allocator);
 
-    // Verifier
-    var verifier_transcript = Transcript(M31).init("basefold");
-    var challenges: [3]M31 = undefined;
-    const final_claim = try basefold.verify(claimed_value, &proof, &r, &verifier_transcript, &challenges);
+    // Verify
+    const valid = try BasefoldM31.verify(allocator, claimed_value, &r, &proof, config);
+    try std.testing.expect(valid);
+}
 
-    // Final check: f(c) * eq(c, r) = final_claim
-    const eq_at_c = eq.eqEvalField(M31, &challenges, &r);
-    const expected_final = proof.final_f.mul(proof.final_eq);
+test "basefold rejects wrong claimed value" {
+    const M31 = @import("../fields/mersenne31.zig").Mersenne31;
+    const BasefoldM31 = Basefold(M31);
+    const eqMod = @import("../poly/eq.zig");
 
-    try std.testing.expect(final_claim.eql(expected_final));
-    try std.testing.expect(proof.final_eq.eql(eq_at_c));
+    const allocator = std.testing.allocator;
+
+    const f_evals = [_]M31{
+        M31.fromU64(1), M31.fromU64(2), M31.fromU64(3), M31.fromU64(4),
+        M31.fromU64(5), M31.fromU64(6), M31.fromU64(7), M31.fromU64(8),
+    };
+
+    const r = [_]M31{ M31.fromU64(10), M31.fromU64(20), M31.fromU64(30) };
+
+    // Compute correct claimed value
+    var eq_evals: [8]M31 = undefined;
+    eqMod.eqEvals(M31, &r, &eq_evals);
+    var claimed_value = M31.zero;
+    for (f_evals, eq_evals) |f, e| {
+        claimed_value = claimed_value.add(f.mul(e));
+    }
+
+    // Prove with correct value
+    const config = BasefoldM31.Config{ .num_queries = 4 };
+    const proof = try BasefoldM31.prove(allocator, &f_evals, &r, config);
+    defer proof.deinit(allocator);
+
+    // Verify with WRONG claimed value
+    const wrong_value = claimed_value.add(M31.one);
+    const valid = try BasefoldM31.verify(allocator, wrong_value, &r, &proof, config);
+    try std.testing.expect(!valid);
 }
