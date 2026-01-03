@@ -11,6 +11,12 @@ pub const multilinear = @import("poly/multilinear.zig");
 pub const Sumcheck = @import("sumcheck.zig").Sumcheck;
 pub const Transcript = @import("transcript.zig").Transcript;
 
+// Re-export VM modules
+pub const vm = struct {
+    pub const stack = @import("vm/stack.zig");
+    pub const trace = @import("vm/trace.zig");
+};
+
 pub fn bufferedPrint() !void {
     // Stdout is for the actual output of your application, for example if you
     // are implementing gzip, then only the compressed bytes should be sent to
@@ -35,4 +41,6 @@ test {
     _ = @import("merkle.zig");
     _ = @import("protocol.zig");
     _ = @import("pcs/basefold.zig");
+    _ = @import("vm/stack.zig");
+    _ = @import("vm/trace.zig");
 }
