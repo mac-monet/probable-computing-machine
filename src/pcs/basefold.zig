@@ -1,9 +1,10 @@
 const std = @import("std");
 
 pub fn Basefold(comptime F: type) type {
-    const ProductSC = @import("../product_sumcheck.zig").ProductSumcheck(F);
+    const iop_sumcheck = @import("../iop/sumcheck.zig");
+    const ProductSC = iop_sumcheck.ProductSumcheck(F);
     const Merkle = @import("../merkle.zig").MerkleTree(F);
-    const Transcript = @import("../transcript.zig").Transcript;
+    const Transcript = @import("../core/transcript.zig").Transcript;
     const multilinear = @import("../poly/multilinear.zig");
     const eq = @import("../poly/eq.zig");
 
@@ -29,7 +30,7 @@ pub fn Basefold(comptime F: type) type {
         };
 
         pub const Proof = struct {
-            rounds: []const ProductSC.RoundPoly2,
+            rounds: []const ProductSC.RoundPoly,
             commitments: []const Commitment,
             final_f: F,
             final_eq: F,
@@ -55,7 +56,7 @@ pub fn Basefold(comptime F: type) type {
         const ProverState = struct {
             layers: [][]F,
             commitments: []Commitment,
-            rounds: []ProductSC.RoundPoly2,
+            rounds: []ProductSC.RoundPoly,
             final_f: F,
             final_eq: F,
             allocator: std.mem.Allocator,
@@ -104,7 +105,7 @@ pub fn Basefold(comptime F: type) type {
             const queries = try generateQueryProofs(&state, query_indices, allocator);
 
             // Copy state data into proof (state will be freed)
-            const rounds = try allocator.alloc(ProductSC.RoundPoly2, num_vars);
+            const rounds = try allocator.alloc(ProductSC.RoundPoly, num_vars);
             @memcpy(rounds, state.rounds);
 
             const commitments = try allocator.alloc(Commitment, num_vars);
@@ -163,7 +164,7 @@ pub fn Basefold(comptime F: type) type {
             num_vars: usize,
             transcript: *Transcript(F),
         ) !ProverState {
-            const rounds = try allocator.alloc(ProductSC.RoundPoly2, num_vars);
+            const rounds = try allocator.alloc(ProductSC.RoundPoly, num_vars);
             const commitments = try allocator.alloc(Commitment, num_vars);
             const layers = try allocator.alloc([]F, num_vars);
 
@@ -180,11 +181,11 @@ pub fn Basefold(comptime F: type) type {
                 commitments[i] = Merkle.commit(current_f);
                 transcript.absorbBytes(&commitments[i]);
 
-                // Round polynomial
-                rounds[i] = ProductSC.computeRound(current_f, current_eq);
-                transcript.absorb(rounds[i].eval_0);
-                transcript.absorb(rounds[i].eval_1);
-                transcript.absorb(rounds[i].eval_2);
+                // Round polynomial using generic sumcheck
+                rounds[i] = ProductSC.computeRound(.{ current_f, current_eq });
+                transcript.absorb(rounds[i][0]);
+                transcript.absorb(rounds[i][1]);
+                transcript.absorb(rounds[i][2]);
 
                 // Challenge
                 const challenge = transcript.squeeze();
@@ -228,12 +229,12 @@ pub fn Basefold(comptime F: type) type {
             for (proof.rounds, proof.commitments, 0..) |round, commitment, i| {
                 // Absorb (same order as prover)
                 transcript.absorbBytes(&commitment);
-                transcript.absorb(round.eval_0);
-                transcript.absorb(round.eval_1);
-                transcript.absorb(round.eval_2);
+                transcript.absorb(round[0]);
+                transcript.absorb(round[1]);
+                transcript.absorb(round[2]);
 
                 // Check g(0) + g(1) = current_claim
-                if (!round.eval_0.add(round.eval_1).eql(current_claim)) {
+                if (!round[0].add(round[1]).eql(current_claim)) {
                     return error.RoundSumMismatch;
                 }
 
@@ -241,8 +242,8 @@ pub fn Basefold(comptime F: type) type {
                 const challenge = transcript.squeeze();
                 challenges_out[i] = challenge;
 
-                // Next claim
-                current_claim = round.evaluate(challenge);
+                // Next claim using generic sumcheck evaluation
+                current_claim = ProductSC.evalRoundPoly(round, challenge);
             }
 
             return current_claim;

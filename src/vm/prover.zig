@@ -3,8 +3,8 @@ const F = @import("../fields/mersenne31.zig").Mersenne31;
 const stack = @import("stack.zig");
 const trace_mod = @import("trace.zig");
 const constraints = @import("constraints.zig");
-const Basefold = @import("../pcs/basefold.zig").Basefold(F);
-const Transcript = @import("../transcript.zig").Transcript;
+const Protocol = @import("../protocol/protocol.zig").Protocol(F);
+const ProtocolConfig = @import("../protocol/protocol.zig").ProtocolConfig;
 
 pub const ProverError = error{
     ConstraintViolation,
@@ -19,11 +19,11 @@ pub const VMProof = struct {
     /// Number of variables in constraint polynomial (log2 of padded trace size)
     num_vars: usize,
 
-    /// Basefold proof that constraint polynomial sums to 0
-    basefold_proof: Basefold.Proof,
+    /// Protocol proof that constraint polynomial sums to 0
+    protocol_proof: Protocol.Proof,
 
     pub fn deinit(self: *const VMProof, allocator: std.mem.Allocator) void {
-        self.basefold_proof.deinit(allocator);
+        self.protocol_proof.deinit(allocator);
     }
 };
 
@@ -69,18 +69,18 @@ pub fn prove(
     // We use a transcript seeded with domain separator
     // In production, this should include commitments to the trace
     const num_vars = std.math.log2_int(usize, constraint_evals.len);
-    const r_point = try deriveRandomPoint(num_vars, allocator);
+    const r_point = try Protocol.deriveRandomPoint("vm-zerocheck", num_vars, allocator);
     defer allocator.free(r_point);
 
-    // 6. Generate Basefold proof
+    // 6. Generate protocol proof (zerocheck)
     // We prove that Σ constraint(x) * eq(x, r) = 0
     // Since constraint(x) = 0 for all x, the sum is 0
-    const basefold_config = Basefold.Config{ .num_queries = config.num_queries };
-    const basefold_proof = try Basefold.prove(
+    const protocol_config = ProtocolConfig{ .num_queries = config.num_queries };
+    const protocol_proof = try Protocol.proveZerocheck(
         allocator,
         constraint_evals,
         r_point,
-        basefold_config,
+        protocol_config,
     );
 
     // 7. Extract output from final state
@@ -90,24 +90,8 @@ pub fn prove(
     return VMProof{
         .output = output,
         .num_vars = num_vars,
-        .basefold_proof = basefold_proof,
+        .protocol_proof = protocol_proof,
     };
-}
-
-/// Derive a random evaluation point for zerocheck.
-/// Uses Fiat-Shamir with a domain separator.
-fn deriveRandomPoint(num_vars: usize, allocator: std.mem.Allocator) ![]F {
-    var transcript = Transcript(F).init("vm-zerocheck");
-
-    // Add domain separation for num_vars
-    transcript.absorb(F.fromU32(@intCast(num_vars)));
-
-    const r_point = try allocator.alloc(F, num_vars);
-    for (r_point) |*r| {
-        r.* = transcript.squeeze();
-    }
-
-    return r_point;
 }
 
 // ============ Tests ============ //
@@ -180,13 +164,13 @@ test "prover: fibonacci program" {
 test "prover: deriveRandomPoint is deterministic" {
     const allocator = testing.allocator;
 
-    const r1 = try deriveRandomPoint(3, allocator);
+    const r1 = try Protocol.deriveRandomPoint("test", 3, allocator);
     defer allocator.free(r1);
 
-    const r2 = try deriveRandomPoint(3, allocator);
+    const r2 = try Protocol.deriveRandomPoint("test", 3, allocator);
     defer allocator.free(r2);
 
-    // Same num_vars should give same point
+    // Same domain and num_vars should give same point
     for (r1, r2) |a, b| {
         try testing.expect(a.eql(b));
     }
@@ -195,10 +179,10 @@ test "prover: deriveRandomPoint is deterministic" {
 test "prover: different num_vars gives different points" {
     const allocator = testing.allocator;
 
-    const r3 = try deriveRandomPoint(3, allocator);
+    const r3 = try Protocol.deriveRandomPoint("test", 3, allocator);
     defer allocator.free(r3);
 
-    const r4 = try deriveRandomPoint(4, allocator);
+    const r4 = try Protocol.deriveRandomPoint("test", 4, allocator);
     defer allocator.free(r4);
 
     // Different num_vars should give different first element

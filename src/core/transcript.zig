@@ -75,7 +75,7 @@ pub fn Transcript(comptime F: type) type {
     };
 }
 
-const M31 = @import("fields/mersenne31.zig").Mersenne31;
+const M31 = @import("../fields/mersenne31.zig").Mersenne31;
 
 test "transcript squeeze determinism" {
     const T = Transcript(M31);

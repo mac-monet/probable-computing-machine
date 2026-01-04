@@ -1,8 +1,8 @@
 const std = @import("std");
 const F = @import("../fields/mersenne31.zig").Mersenne31;
 const prover = @import("prover.zig");
-const Basefold = @import("../pcs/basefold.zig").Basefold(F);
-const Transcript = @import("../transcript.zig").Transcript;
+const Protocol = @import("../protocol/protocol.zig").Protocol(F);
+const ProtocolConfig = @import("../protocol/protocol.zig").ProtocolConfig;
 
 pub const VerifierConfig = struct {
     /// Number of FRI queries (must match prover config)
@@ -23,20 +23,20 @@ pub fn verify(
     }
 
     // 2. Derive the same random point as prover
-    const r_point = try deriveRandomPoint(proof.num_vars, allocator);
+    const r_point = try Protocol.deriveRandomPoint("vm-zerocheck", proof.num_vars, allocator);
     defer allocator.free(r_point);
 
-    // 3. Verify Basefold proof that constraint polynomial sums to 0
+    // 3. Verify protocol proof that constraint polynomial sums to 0
     // The claimed value is 0 (zerocheck)
     const claimed_value = F.zero;
-    const basefold_config = Basefold.Config{ .num_queries = config.num_queries };
+    const protocol_config = ProtocolConfig{ .num_queries = config.num_queries };
 
-    return try Basefold.verify(
+    return try Protocol.verifyZerocheck(
         allocator,
         claimed_value,
         r_point,
-        &proof.basefold_proof,
-        basefold_config,
+        &proof.protocol_proof,
+        protocol_config,
     );
 }
 
@@ -48,36 +48,20 @@ pub fn verifyProof(
     config: VerifierConfig,
 ) !bool {
     // Derive the same random point as prover
-    const r_point = try deriveRandomPoint(proof.num_vars, allocator);
+    const r_point = try Protocol.deriveRandomPoint("vm-zerocheck", proof.num_vars, allocator);
     defer allocator.free(r_point);
 
-    // Verify Basefold proof that constraint polynomial sums to 0
+    // Verify protocol proof that constraint polynomial sums to 0
     const claimed_value = F.zero;
-    const basefold_config = Basefold.Config{ .num_queries = config.num_queries };
+    const protocol_config = ProtocolConfig{ .num_queries = config.num_queries };
 
-    return try Basefold.verify(
+    return try Protocol.verifyZerocheck(
         allocator,
         claimed_value,
         r_point,
-        &proof.basefold_proof,
-        basefold_config,
+        &proof.protocol_proof,
+        protocol_config,
     );
-}
-
-/// Derive a random evaluation point for zerocheck.
-/// Must match prover's deriveRandomPoint exactly.
-fn deriveRandomPoint(num_vars: usize, allocator: std.mem.Allocator) ![]F {
-    var transcript = Transcript(F).init("vm-zerocheck");
-
-    // Add domain separation for num_vars
-    transcript.absorb(F.fromU32(@intCast(num_vars)));
-
-    const r_point = try allocator.alloc(F, num_vars);
-    for (r_point) |*r| {
-        r.* = transcript.squeeze();
-    }
-
-    return r_point;
 }
 
 // ============ Tests ============ //

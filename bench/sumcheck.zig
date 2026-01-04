@@ -1,7 +1,7 @@
 const std = @import("std");
 const bench = @import("main.zig");
 const libzero = @import("libzero");
-const Sumcheck = libzero.Sumcheck;
+const LinearSumcheck = libzero.sumcheck.LinearSumcheck;
 const Transcript = libzero.Transcript;
 const Mersenne31 = libzero.Mersenne31;
 
@@ -21,6 +21,7 @@ pub fn run(writer: anytype) !void {
 }
 
 fn benchSize(comptime F: type, comptime num_vars: usize, allocator: std.mem.Allocator, writer: anytype) !void {
+    const SC = LinearSumcheck(F);
     const size = @as(usize, 1) << num_vars;
     const elem_bytes = @sizeOf(F);
     const data_bytes = size * elem_bytes;
@@ -42,7 +43,7 @@ fn benchSize(comptime F: type, comptime num_vars: usize, allocator: std.mem.Allo
     }
 
     // Round polynomials output
-    var rounds: [num_vars]Sumcheck(F).RoundPoly = undefined;
+    var rounds: [num_vars]SC.RoundPoly = undefined;
 
     const label_prefix = std.fmt.comptimePrint("n={d} ", .{num_vars});
 
@@ -51,11 +52,13 @@ fn benchSize(comptime F: type, comptime num_vars: usize, allocator: std.mem.Allo
         fn call(
             original_evals: []const F,
             scratch_buf: []F,
-            rnd: *[num_vars]Sumcheck(F).RoundPoly,
-        ) F {
+            rnd: *[num_vars]SC.RoundPoly,
+        ) [1]F {
             @memcpy(scratch_buf, original_evals);
             var transcript = Transcript(F).init("bench");
-            return Sumcheck(F).prove(scratch_buf, rnd, &transcript);
+            var challenges: [num_vars]F = undefined;
+            var work_polys = [_][]F{scratch_buf};
+            return SC.prove(&work_polys, &transcript, rnd, &challenges);
         }
     };
 
@@ -82,7 +85,9 @@ fn benchSize(comptime F: type, comptime num_vars: usize, allocator: std.mem.Allo
     // Run one prove to get valid rounds for verify benchmark
     @memcpy(scratch, evals);
     var prover_transcript = Transcript(F).init("bench");
-    _ = Sumcheck(F).prove(scratch, &rounds, &prover_transcript);
+    var prove_challenges: [num_vars]F = undefined;
+    var work_polys = [_][]F{scratch};
+    _ = SC.prove(&work_polys, &prover_transcript, &rounds, &prove_challenges);
 
     // Compute claimed sum for verification
     const claimed_sum = blk: {
@@ -97,16 +102,16 @@ fn benchSize(comptime F: type, comptime num_vars: usize, allocator: std.mem.Allo
     const VerifyWrapper = struct {
         fn call(
             claim: F,
-            rnd: *const [num_vars]Sumcheck(F).RoundPoly,
+            rnd: *const [num_vars]SC.RoundPoly,
         ) F {
             var transcript = Transcript(F).init("bench");
             var challenges: [num_vars]F = undefined;
-            return Sumcheck(F).verify(claim, rnd, &transcript, &challenges) catch unreachable;
+            return SC.verify(claim, rnd, &transcript, &challenges) catch unreachable;
         }
     };
 
     // Verifier memory: just reads rounds array (small)
-    const verify_bytes = num_vars * @sizeOf(Sumcheck(F).RoundPoly);
+    const verify_bytes = num_vars * @sizeOf(SC.RoundPoly);
 
     try bench.benchmarkMem(
         label_prefix ++ "verify",

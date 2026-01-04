@@ -8,8 +8,8 @@ pub const Mersenne31 = @import("fields/mersenne31.zig").Mersenne31;
 pub const multilinear = @import("poly/multilinear.zig");
 
 // Re-export protocols
-pub const Sumcheck = @import("sumcheck.zig").Sumcheck;
-pub const Transcript = @import("transcript.zig").Transcript;
+pub const sumcheck = @import("iop/sumcheck.zig");
+pub const Transcript = @import("core/transcript.zig").Transcript;
 
 // Re-export VM modules
 pub const vm = struct {
@@ -38,11 +38,8 @@ test {
     _ = @import("fields/mersenne31.zig");
     _ = @import("poly/multilinear.zig");
     _ = @import("poly/eq.zig");
-    _ = @import("sumcheck.zig");
-    _ = @import("product_sumcheck.zig");
-    _ = @import("transcript.zig");
+    _ = @import("core/transcript.zig");
     _ = @import("merkle.zig");
-    _ = @import("protocol.zig");
     _ = @import("pcs/basefold.zig");
     _ = @import("vm/stack.zig");
     _ = @import("vm/trace.zig");
@@ -50,4 +47,11 @@ test {
     _ = @import("vm/prover.zig");
     _ = @import("vm/verifier.zig");
     _ = @import("vm/proof_test.zig");
+
+    // New architecture
+    _ = @import("core/context.zig");
+    _ = @import("iop/sumcheck.zig");
+    _ = @import("pcs/pcs.zig");
+    _ = @import("protocol/protocol.zig");
+    _ = @import("protocol/configs.zig");
 }
