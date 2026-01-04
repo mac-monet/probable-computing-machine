@@ -18,19 +18,20 @@ bd sync               # Sync with remote
 
 **MANDATORY WORKFLOW:**
 
-1. **File issues for remaining work** - Create issues for anything that needs follow-up
-2. **Run quality gates** (if code changed) - Tests, linters, builds
-3. **Update issue status** - Close finished work, update in-progress items
-4. **PUSH TO REMOTE** - This is MANDATORY:
+1. **Describe your changes** - `jj describe -m "..."` for each change, `jj new` between logical units
+2. **File issues for remaining work** - Create issues for anything that needs follow-up
+3. **Run quality gates** (if code changed) - Tests, linters, builds
+4. **Update issue status** - Close finished work, update in-progress items
+5. **PUSH TO REMOTE** - This is MANDATORY:
    ```bash
    jj git fetch
    bd sync
    jj git push
    jj log -r 'remote_bookmarks()'  # Verify remote is synced
    ```
-5. **Clean up** - Abandon empty changes, clean up bookmarks
-6. **Verify** - All changes committed AND pushed
-7. **Hand off** - Provide context for next session
+6. **Clean up** - Abandon empty changes, clean up bookmarks
+7. **Verify** - All changes committed AND pushed
+8. **Hand off** - Provide context for next session
 
 **CRITICAL RULES:**
 - Work is NOT complete until `jj git push` succeeds
