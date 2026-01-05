@@ -1,8 +1,8 @@
 const std = @import("std");
 const F = @import("../fields/mersenne31.zig").Mersenne31;
 const prover = @import("prover.zig");
-const Protocol = @import("../protocol/protocol.zig").Protocol(F);
-const ProtocolConfig = @import("../protocol/protocol.zig").ProtocolConfig;
+const Basefold = @import("../pcs/basefold.zig").Basefold(F);
+const Transcript = @import("../core/transcript.zig").Transcript;
 
 pub const VerifierConfig = struct {
     /// Number of FRI queries (must match prover config)
@@ -23,20 +23,21 @@ pub fn verify(
     }
 
     // 2. Derive the same random point as prover
-    const r_point = try Protocol.deriveRandomPoint("vm-zerocheck", proof.num_vars, allocator);
+    const r_point = try allocator.alloc(F, proof.num_vars);
     defer allocator.free(r_point);
+    Transcript(F).derivePoint("vm-zerocheck", r_point);
 
-    // 3. Verify protocol proof that constraint polynomial sums to 0
+    // 3. Verify Basefold proof that constraint polynomial sums to 0
     // The claimed value is 0 (zerocheck)
     const claimed_value = F.zero;
-    const protocol_config = ProtocolConfig{ .num_queries = config.num_queries };
+    const basefold_config = Basefold.Config{ .num_queries = config.num_queries };
 
-    return try Protocol.verifyZerocheck(
+    return try Basefold.verify(
         allocator,
         claimed_value,
         r_point,
-        &proof.protocol_proof,
-        protocol_config,
+        &proof.basefold_proof,
+        basefold_config,
     );
 }
 
@@ -48,19 +49,20 @@ pub fn verifyProof(
     config: VerifierConfig,
 ) !bool {
     // Derive the same random point as prover
-    const r_point = try Protocol.deriveRandomPoint("vm-zerocheck", proof.num_vars, allocator);
+    const r_point = try allocator.alloc(F, proof.num_vars);
     defer allocator.free(r_point);
+    Transcript(F).derivePoint("vm-zerocheck", r_point);
 
-    // Verify protocol proof that constraint polynomial sums to 0
+    // Verify Basefold proof that constraint polynomial sums to 0
     const claimed_value = F.zero;
-    const protocol_config = ProtocolConfig{ .num_queries = config.num_queries };
+    const basefold_config = Basefold.Config{ .num_queries = config.num_queries };
 
-    return try Protocol.verifyZerocheck(
+    return try Basefold.verify(
         allocator,
         claimed_value,
         r_point,
-        &proof.protocol_proof,
-        protocol_config,
+        &proof.basefold_proof,
+        basefold_config,
     );
 }
 

@@ -49,9 +49,8 @@ test {
     _ = @import("vm/proof_test.zig");
 
     // New architecture
+    _ = @import("core/tracer.zig");
     _ = @import("core/context.zig");
     _ = @import("iop/sumcheck.zig");
     _ = @import("pcs/pcs.zig");
-    _ = @import("protocol/protocol.zig");
-    _ = @import("protocol/configs.zig");
 }

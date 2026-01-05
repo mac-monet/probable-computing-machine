@@ -2,35 +2,38 @@
 
 The s6k runtime is the async execution engine for sumcheck computations. It wraps s6k primitives (see S6K_SYNC.md) as jobs and handles scheduling, parallelism, and hardware dispatch.
 
+## Design Principles
+
+### Streaming by Default
+
+The runtime assumes data may exceed RAM. All operations are streaming-capable.
+
+- Small data streams fast (no penalty)
+- Large data streams from SSD
+- Single code path, no mode switching
+- In-memory mode exists only for testing/benchmarking
+
+### Backend Selection: CPU or GPU
+
+The runtime dispatches to either:
+- **CPU pool**: Thread-parallel, streaming I/O
+- **GPU queue**: Batch offload, memory transfer managed
+
+Selection based on problem size and available hardware.
+
 ## Evolution from Primitives
 
 ```
-s6k Primitives (v1)              s6k Runtime (v2)
+s6k Primitives (sync)            s6k Runtime (async)
 ─────────────────────            ─────────────────────
 Protocol calls directly    →     Protocol submits job graph
 Protocol owns execution    →     Runtime owns execution
 Synchronous               →     Asynchronous
-Single-threaded           →     Parallel (CPU pool, GPU, distributed)
+Single-threaded           →     Parallel (CPU pool, GPU)
+In-memory assumed         →     Streaming by default
 ```
 
-The primitives remain unchanged - the runtime wraps them:
-
-```zig
-// Primitive (from SUMCHECK_RUNTIME_V2.md)
-pub fn computeRound(comptime degree, buffer: [*]const F, len: usize) Coeffs(degree);
-
-// Runtime job executor calls the same primitive
-fn executeJob(self: *Runtime, job: Job) void {
-    switch (job) {
-        .compute_round => |j| {
-            const buf = self.buffers.getSlice(j.buffer);
-            const coeffs = s6k(F).computeRound(j.degree, buf.ptr, j.len);
-            self.promises.fulfill(j.output, coeffs);
-        },
-        // ...
-    }
-}
-```
+The primitives remain unchanged - the runtime wraps them and handles streaming transparently.
 
 ---
 
@@ -48,24 +51,24 @@ fn executeJob(self: *Runtime, job: Job) void {
                               ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │  s6k Runtime                                                     │
-│    - Analyzes job dependencies                                   │
-│    - Schedules ready jobs to backends                            │
-│    - Manages buffer lifecycle                                    │
-│    - Fulfills promises on completion                             │
+│    - Schedules jobs to backends                                  │
+│    - Manages streaming (chunking, pipelining)                    │
+│    - Handles buffer lifecycle and location                       │
 └─────────────────────────────────────────────────────────────────┘
           │                    │                    │
           ▼                    ▼                    ▼
    ┌────────────┐      ┌────────────┐      ┌────────────┐
-   │ CPU Pool   │      │ GPU Queue  │      │ IO Pool    │
-   │            │      │            │      │            │
-   └──────┬─────┘      └──────┬─────┘      └──────┬─────┘
+   │ CPU Pool   │      │ GPU Queue  │      │ I/O Pool   │
+   │ (compute)  │      │ (compute)  │      │ (disk)     │
+   └────────────┘      └────────────┘      └────────────┘
           │                   │                   │
-          ▼                   ▼                   ▼
-   ┌────────────────────────────────────────────────────┐
-   │  s6k Primitives (same code, different backends)    │
-   │    - computeRound, foldInPlace, etc.               │
-   │    - SIMD (CPU), shader (GPU)                      │
-   └────────────────────────────────────────────────────┘
+          └───────────────────┴───────────────────┘
+                              │
+                              ▼
+                    ┌─────────────────────┐
+                    │  s6k Primitives     │
+                    │  (streaming-aware)  │
+                    └─────────────────────┘
 ```
 
 ---
@@ -76,53 +79,45 @@ The synchronous primitive model leaves performance on the table:
 
 | Limitation | Runtime Solution |
 |------------|------------------|
-| No parallelism across sumchecks | Batched job graphs execute concurrently |
-| No compute/IO overlap | Pipeline parallelism (commit while computing) |
+| No I/O-compute overlap | Pipeline I/O with compute (streaming) |
 | No within-round parallelism | Chunk jobs split large polynomials |
 | No GPU offload | Backend dispatch based on size threshold |
+| Data must fit in RAM | Streaming from SSD by default |
 | No distributed execution | Handles serialize for network transfer |
+
+**Key insight**: For in-memory proofs, sumcheck rounds are strictly sequential (challenge dependencies). The async runtime's main value is **I/O-compute overlap for streaming**, not in-memory pipelining.
 
 ---
 
 ## Parallelism Opportunities
 
-### 1. Independent Sumchecks (Batched Proving)
+### 1. Streaming I/O-Compute Overlap
 
-Multiple sumcheck instances with independent transcripts:
-
-```
-Time →
-
-Sumcheck A: [round_0] [round_1] [round_2] ...
-Sumcheck B: [round_0] [round_1] [round_2] ...
-Sumcheck C: [round_0] [round_1] [round_2] ...
-            ↑________↑_________↑
-            All run in parallel
-```
-
-### 2. Pipeline Parallelism (Compute + IO)
-
-Overlap Merkle commits with computation:
+The primary parallelism opportunity. Pipeline reads, compute, and writes:
 
 ```
 Time →
 
-Compute:  [round_0        ] [round_1        ] [round_2        ]
-Commit:            [commit_0       ] [commit_1       ] [commit_2
-                   ↑_______________↑
-                   Overlapped with round_1 compute
+I/O Pool:    [read_0][read_1][read_2][read_3]...
+                     ╲       ╲       ╲
+CPU Pool:            [proc_0][proc_1][proc_2]...
+                            ╲       ╲
+I/O Pool:                   [write_0][write_1]...
+
+Throughput approaches: min(SSD bandwidth, compute throughput)
 ```
 
-### 3. Within-Round Parallelism (Chunking)
+This works because I/O and compute use different resources. Unlike in-memory proofs where rounds are strictly sequential.
 
-Large polynomials split across workers:
+### 2. Within-Round Data Parallelism
+
+Large polynomials split across workers (CPU threads or GPU):
 
 ```
 Polynomial (2^20 elements):
 
 ┌───────────────┬───────────────┬───────────────┬───────────────┐
 │ chunk_0       │ chunk_1       │ chunk_2       │ chunk_3       │
-│ (0..2^18)     │ (2^18..2^19)  │ (2^19..3·2^18)│ (3·2^18..2^20)│
 └───────┬───────┴───────┬───────┴───────┬───────┴───────┬───────┘
         │               │               │               │
         ▼               ▼               ▼               ▼
@@ -130,48 +125,74 @@ Polynomial (2^20 elements):
         │               │               │               │
         └───────────────┴───────┬───────┴───────────────┘
                                 ▼
-                         reduce_coeffs
-                                │
-                                ▼
-                         final coefficients
+                         reduce → final coefficients
 ```
 
-### 4. Cross-Layer Parallelism (GKR)
+### 3. Precomputation Parallelism (SVO)
 
-GKR layers can pipeline:
+Accumulator precomputation is embarrassingly parallel across x' indices.
 
-```
-Layer N:   [sumcheck] → claim_{N-1}
-Layer N-1:             [sumcheck] → claim_{N-2}
-Layer N-2:                         [sumcheck] → ...
-                       ↑
-                       Starts when claim ready
-```
+### 4. Independent Proof Parallelism
 
-### 5. Precomputation Parallelism (SVO)
+Multiple independent proofs can run concurrently, sharing the thread pool.
 
-Accumulator precomputation is embarrassingly parallel:
+---
 
-```
-precompute_accumulators job → splits into:
+## Streaming Considerations
 
-┌─────────────────┬─────────────────┬─────────────────┐
-│ chunk (x'=0..K) │ chunk (x'=K..2K)│ chunk (x'=2K..) │
-└────────┬────────┴────────┬────────┴────────┬────────┘
-         │                 │                 │
-         ▼                 ▼                 ▼
-    partial_accum     partial_accum     partial_accum
-         │                 │                 │
-         └─────────────────┼─────────────────┘
-                           ▼
-                  reduce_accumulators
-```
+Key design points for implementers:
+
+### Data Layout
+- Lo/hi pairs must be accessible together (either interleaved or dual-file)
+- Sequential access patterns maximize SSD throughput
+- Random seeks kill performance (10-100x slower than sequential)
+
+### I/O-Compute Pipeline
+- Maintain multiple chunks in flight (triple buffering or more)
+- Keep SSD bandwidth saturated while CPU/GPU processes
+- Backpressure when compute is slower than I/O
+
+### Chunk Size Trade-offs
+- Larger chunks: better SSD throughput, higher memory usage
+- Smaller chunks: lower memory, finer pipeline granularity
+- Typical range: 64MB-256MB
+
+### Two Passes Per Round
+- Pass 1: Read all chunks, accumulate round polynomial
+- Pass 2: Read chunks, fold with challenge, write to output
+- Output file is half the size of input (data halves each round)
+- Total I/O per proof: O(N log N)
+
+### Extension Field Transition
+- First fold converts BaseF → ExtF (data grows 3-4x)
+- Plan buffer space accordingly
+- May write ExtF output to different file than BaseF input
+
+---
+
+## Backend Selection
+
+| Factor | CPU Pool | GPU Queue |
+|--------|----------|-----------|
+| Small N (< 64K elements) | Preferred (transfer overhead dominates) | |
+| Large N (> 1M elements) | | Preferred (if available) |
+| Streaming I/O | Good (overlaps with I/O) | Limited (transfer bottleneck) |
+| Memory constrained | Good | Depends on GPU memory |
+
+Runtime selects automatically based on buffer size and location.
 
 ---
 
 ## Job Types
 
-Jobs map 1:1 to s6k primitives. The runtime executes the primitive when the job runs.
+Jobs map to s6k primitives. The runtime handles streaming transparently - jobs don't distinguish between memory and disk-backed buffers.
+
+When a buffer's location is `disk`, the runtime automatically:
+- Chunks the operation
+- Pipelines I/O with compute
+- Manages temporary buffers
+
+Protocol code is identical regardless of data size.
 
 ```zig
 pub const Job = union(enum) {
@@ -424,10 +445,9 @@ pub const BufferRegistry = struct {
     };
 
     pub const BufferLocation = enum {
-        cpu,
-        gpu,
-        remote,
-        evicted,  // Spilled to disk under memory pressure
+        memory,  // RAM (CPU-accessible)
+        gpu,     // GPU memory
+        disk,    // SSD-backed, streaming access
     };
 
     // ══════════════════════════════════════════════════════════════
@@ -1103,19 +1123,17 @@ Transcript operations, IO are jobs with explicit dependencies.
 
 1. **Error Propagation**: How do job failures cascade? Cancel dependent jobs?
 
-2. **Backpressure**: What if jobs produce faster than consumers? Queue limits?
+2. **Checkpointing**: Can we save/restore execution state mid-proof? (Important for very long proofs)
 
-3. **Cancellation**: Can we cancel an in-flight job graph?
+3. **Profiling**: How do we trace job execution for optimization?
 
-4. **Checkpointing**: Can we save/restore job graph execution state?
+4. **GPU + Streaming**: Can GPU be effective with disk-backed data? Transfer bottleneck vs compute speedup.
 
-5. **Profiling**: How do we trace job execution for optimization?
+5. **Optimal Chunk Size**: How to auto-tune based on SSD speed, compute speed, available memory?
 
-6. **Memory Pressure**: How does runtime handle OOM? Spill to disk?
+6. **SSD Wear**: Heavy streaming writes. Temporary file cleanup, write amplification concerns.
 
-7. **GPU Memory**: When to transfer between CPU/GPU? Heuristics?
-
-8. **Distributed Scheduling**: How to partition job graph across machines?
+7. **Distributed Streaming**: How to partition streaming across multiple machines/SSDs?
 
 ---
 

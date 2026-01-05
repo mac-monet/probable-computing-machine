@@ -62,6 +62,21 @@ pub fn Transcript(comptime F: type) type {
             return result;
         }
 
+        /// Squeeze challenges into a slice (for runtime-sized output)
+        pub fn squeezeChallenges(self: *Self, out: []F) void {
+            for (out) |*r| {
+                r.* = self.squeeze();
+            }
+        }
+
+        /// Derive a random evaluation point from a fresh transcript.
+        /// Creates new transcript with domain, absorbs num_vars, squeezes challenges.
+        pub fn derivePoint(domain: []const u8, out: []F) void {
+            var t = Self.init(domain);
+            t.absorb(F.fromU32(@intCast(out.len)));
+            t.squeezeChallenges(out);
+        }
+
         /// Refill the buffer using Blake3 XOF
         fn refillBuffer(self: *Self) void {
             // Copy state to preserve it for potential future absorbs

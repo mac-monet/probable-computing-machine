@@ -1,14 +1,52 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Transcript = @import("transcript.zig").Transcript;
+const tracer_mod = @import("tracer.zig");
+
+/// Context options - all comptime for zero-cost when disabled
+pub const Options = struct {
+    /// Enable span-based tracing for profiling
+    tracing: bool = false,
+
+    // TODO: Add DST (Deterministic Simulation Testing) options:
+    // simulated_clock: bool = false,  // Deterministic time
+    // simulated_rng: bool = false,    // Seeded RNG for reproducibility
+    // simulated_io: bool = false,     // Controllable I/O for async runtime
+};
+
+/// Zero-cost span type - compiles to nothing when tracing disabled
+pub fn Span(comptime enabled: bool) type {
+    if (enabled) {
+        return struct {
+            tracer: *tracer_mod.Tracer,
+            name: []const u8,
+            start: u64,
+
+            pub inline fn end(self: @This()) void {
+                self.tracer.record(self.name, self.start);
+            }
+
+            /// Record bytes processed (for throughput calculation)
+            pub inline fn endWithSize(self: @This(), bytes: usize) void {
+                self.tracer.recordWithSize(self.name, self.start, bytes);
+            }
+        };
+    } else {
+        return struct {
+            pub inline fn end(_: @This()) void {}
+            pub inline fn endWithSize(_: @This(), _: usize) void {}
+        };
+    }
+}
 
 /// ProverContext owns memory for proving operations.
 /// Uses arena allocation for proof data and fixed scratch buffers for folding.
-pub fn ProverContext(comptime F: type, comptime max_vars: usize) type {
+pub fn ProverContext(comptime F: type, comptime max_vars: usize, comptime opts: Options) type {
     const max_size = 1 << max_vars;
 
     return struct {
         const Self = @This();
+        pub const options = opts;
 
         /// Backing allocator for arena
         backing: Allocator,
@@ -26,7 +64,23 @@ pub fn ProverContext(comptime F: type, comptime max_vars: usize) type {
         /// Transcript for Fiat-Shamir challenges
         transcript: Transcript(F),
 
+        /// Tracer for profiling (only exists if opts.tracing == true)
+        tracer: if (opts.tracing) *tracer_mod.Tracer else void,
+
+        // TODO: Add DST fields (conditional on opts):
+        // clock: if (opts.simulated_clock) *SimulatedClock else RealClock,
+        // rng: if (opts.simulated_rng) *SeededRng else void,
+        // io: if (opts.simulated_io) *SimulatedIO else void,
+
         pub fn init(backing: Allocator) !Self {
+            return initWithTracer(backing, if (opts.tracing) null else {});
+        }
+
+        pub fn initWithTracer(backing: Allocator, tracer: if (opts.tracing) ?*tracer_mod.Tracer else void) !Self {
+            if (opts.tracing and tracer == null) {
+                @panic("Tracing enabled but no tracer provided. Use initWithTracer().");
+            }
+
             var arena = std.heap.ArenaAllocator.init(backing);
             errdefer arena.deinit();
 
@@ -42,6 +96,7 @@ pub fn ProverContext(comptime F: type, comptime max_vars: usize) type {
                 .scratch = scratch,
                 .scratch_aux = scratch_aux,
                 .transcript = Transcript(F).init(""),
+                .tracer = if (opts.tracing) tracer.? else {},
             };
         }
 
@@ -93,6 +148,22 @@ pub fn ProverContext(comptime F: type, comptime max_vars: usize) type {
             std.debug.assert(size <= max_size);
             return self.scratch_aux[0..size];
         }
+
+        // ============ Tracing ============ //
+
+        /// Start a tracing span. Call .end() when done.
+        /// Zero-cost when opts.tracing == false.
+        pub inline fn span(self: *Self, comptime name: []const u8) Span(opts.tracing) {
+            if (opts.tracing) {
+                return .{
+                    .tracer = self.tracer,
+                    .name = name,
+                    .start = self.tracer.now(),
+                };
+            } else {
+                return .{};
+            }
+        }
     };
 }
 
@@ -120,7 +191,7 @@ pub fn VerifierContext(comptime F: type) type {
 const M31 = @import("../fields/mersenne31.zig").Mersenne31;
 
 test "ProverContext init and deinit" {
-    var ctx = try ProverContext(M31, 10).init(std.testing.allocator);
+    var ctx = try ProverContext(M31, 10, .{}).init(std.testing.allocator);
     defer ctx.deinit();
 
     // Verify scratch buffers are the right size
@@ -129,7 +200,7 @@ test "ProverContext init and deinit" {
 }
 
 test "ProverContext scratch buffer reuse" {
-    var ctx = try ProverContext(M31, 10).init(std.testing.allocator);
+    var ctx = try ProverContext(M31, 10, .{}).init(std.testing.allocator);
     defer ctx.deinit();
 
     // First use
@@ -147,7 +218,7 @@ test "ProverContext scratch buffer reuse" {
 }
 
 test "ProverContext arena allocation and reset" {
-    var ctx = try ProverContext(M31, 10).init(std.testing.allocator);
+    var ctx = try ProverContext(M31, 10, .{}).init(std.testing.allocator);
     defer ctx.deinit();
 
     // Allocate some data in arena
@@ -179,7 +250,7 @@ test "VerifierContext basic usage" {
 }
 
 test "ProverContext transcript consistency" {
-    var prover_ctx = try ProverContext(M31, 10).init(std.testing.allocator);
+    var prover_ctx = try ProverContext(M31, 10, .{}).init(std.testing.allocator);
     defer prover_ctx.deinit();
     prover_ctx.resetWithDomain("test-protocol");
 
@@ -194,4 +265,32 @@ test "ProverContext transcript consistency" {
     const verifier_c = verifier_ctx.transcript.squeeze();
 
     try std.testing.expect(prover_c.eql(verifier_c));
+}
+
+test "ProverContext span tracing disabled" {
+    // Default: tracing disabled - span is zero-cost
+    var ctx = try ProverContext(M31, 10, .{}).init(std.testing.allocator);
+    defer ctx.deinit();
+
+    const s = ctx.span("test_span");
+    s.end(); // Compiles to nothing
+}
+
+test "ProverContext span tracing enabled" {
+    // Tracing enabled - needs tracer instance
+    var tracer = tracer_mod.Tracer.init(std.testing.allocator);
+    defer tracer.deinit();
+
+    var ctx = try ProverContext(M31, 10, .{ .tracing = true }).initWithTracer(std.testing.allocator, &tracer);
+    defer ctx.deinit();
+
+    const s = ctx.span("test_span");
+    // Small busy loop
+    var x: u64 = 0;
+    for (0..1000) |i| x += i;
+    std.mem.doNotOptimizeAway(&x);
+    s.end();
+
+    try std.testing.expectEqual(@as(usize, 1), tracer.events.items.len);
+    try std.testing.expectEqualStrings("test_span", tracer.events.items[0].name);
 }
