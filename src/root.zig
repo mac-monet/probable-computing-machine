@@ -11,6 +11,9 @@ pub const multilinear = @import("poly/multilinear.zig");
 pub const sumcheck = @import("iop/sumcheck.zig");
 pub const Transcript = @import("core/transcript.zig").Transcript;
 
+// Re-export merkle tree
+pub const merkle = @import("merkle/root.zig");
+
 // Re-export VM modules
 pub const vm = struct {
     pub const stack = @import("vm/stack.zig");
@@ -39,7 +42,7 @@ test {
     _ = @import("poly/multilinear.zig");
     _ = @import("poly/eq.zig");
     _ = @import("core/transcript.zig");
-    _ = @import("merkle.zig");
+    _ = @import("merkle/root.zig");
     _ = @import("pcs/basefold.zig");
     _ = @import("vm/stack.zig");
     _ = @import("vm/trace.zig");
