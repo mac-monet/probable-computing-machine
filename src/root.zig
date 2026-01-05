@@ -14,6 +14,12 @@ pub const Transcript = @import("core/transcript.zig").Transcript;
 // Re-export merkle tree
 pub const merkle = @import("merkle/root.zig");
 
+// Re-export constraint system
+pub const constraint = @import("constraint/constraint.zig");
+
+// Re-export trace system
+pub const trace = @import("trace/trace.zig");
+
 // Re-export VM modules
 pub const vm = struct {
     pub const stack = @import("vm/stack.zig");
@@ -56,4 +62,10 @@ test {
     _ = @import("core/context.zig");
     _ = @import("iop/sumcheck.zig");
     _ = @import("pcs/pcs.zig");
+
+    // Constraint system
+    _ = @import("constraint/constraint.zig");
+
+    // Trace system
+    _ = @import("trace/trace.zig");
 }

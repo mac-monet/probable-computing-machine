@@ -71,10 +71,10 @@ pub const Trace = struct {
     /// Set a cell value
     pub fn set(self: *Trace, col: usize, row: usize, val: F) void;
 
-    /// Get a cell value with rotation (wraps around)
+    /// Get a cell value with rotation (no wraparound - caller must ensure valid row)
     pub fn get(self: Trace, col: usize, row: usize, rot: i8) F {
-        const num_rows_i: i32 = @intCast(self.num_rows);
-        const actual_row: usize = @intCast(@mod(@as(i32, @intCast(row)) + rot, num_rows_i));
+        const actual_row: usize = @intCast(@as(i32, @intCast(row)) + rot);
+        std.debug.assert(actual_row < self.num_rows);  // bounds check in debug
         return self.columns.items[col][actual_row];
     }
 
@@ -86,7 +86,7 @@ pub const Trace = struct {
 **Key points:**
 - Column-major storage (good for commitments, polynomial ops)
 - Power-of-2 rows (required for multilinear)
-- Rotation handled in `get()` with wraparound
+- Rotation handled in `get()` with bounds checking (no wraparound)
 
 ### 1.2 Constraint Types
 
@@ -112,7 +112,39 @@ pub const Constraint = []const Term;
 - Term = coefficient × product of values
 - Constraint = sum of terms = 0
 
-### 1.3 Constraint Set
+### 1.3 Constraint (with Valid Row Range)
+
+Constraints have a **valid row range** computed from their rotations. This is deterministic and known at constraint definition time.
+
+```zig
+pub const Constraint = struct {
+    terms: []const Term,
+
+    /// Compute valid row range from rotations in terms
+    /// A constraint with rot=1 is valid for rows [0, num_rows-1)
+    /// A constraint with rot=-1 is valid for rows [1, num_rows)
+    pub fn validRowRange(self: Constraint, num_rows: usize) struct { start: usize, end: usize } {
+        var min_rot: i8 = 0;
+        var max_rot: i8 = 0;
+
+        for (self.terms) |term| {
+            for (term.cells) |cell| {
+                min_rot = @min(min_rot, cell.rot);
+                max_rot = @max(max_rot, cell.rot);
+            }
+        }
+
+        // If min_rot = -1, start = 1 (can't access row -1)
+        // If max_rot = 2, end = num_rows - 2 (can't access row num_rows+1)
+        const start: usize = if (min_rot < 0) @intCast(-min_rot) else 0;
+        const end: usize = num_rows - @as(usize, @intCast(max_rot));
+
+        return .{ .start = start, .end = end };
+    }
+};
+```
+
+### 1.4 Constraint Set
 
 ```zig
 pub const ConstraintSet = struct {
@@ -123,7 +155,7 @@ pub const ConstraintSet = struct {
     pub fn deinit(self: *ConstraintSet) void;
 
     /// Add a constraint
-    pub fn add(self: *ConstraintSet, constraint: Constraint) void;
+    pub fn add(self: *ConstraintSet, terms: []const Term) void;
 
     /// Number of constraints
     pub fn len(self: ConstraintSet) usize;
@@ -134,10 +166,11 @@ pub const ConstraintSet = struct {
 
 ## Phase 2: Constraint Evaluation
 
-The core algorithm: evaluate all constraints at each row.
+The core algorithm: evaluate each constraint only on its valid row range.
 
 ```zig
 /// Evaluate constraints over trace, returns polynomial evaluations
+/// Each constraint is only evaluated on rows where all rotations are valid
 /// Result[row] = sum of all constraint evaluations at that row
 /// For valid witness: all values should be zero
 pub fn evaluate(
@@ -149,10 +182,13 @@ pub fn evaluate(
     var result = try allocator.alloc(F, num_rows);
     @memset(result, F.zero);
 
-    for (0..num_rows) |row| {
-        for (constraints) |constraint| {
+    for (constraints) |constraint| {
+        // Only evaluate on valid rows for this constraint
+        const range = constraint.validRowRange(num_rows);
+
+        for (range.start..range.end) |row| {
             // Evaluate this constraint at this row
-            for (constraint) |term| {
+            for (constraint.terms) |term| {
                 var prod = term.coeff;
                 for (term.cells) |cell| {
                     const val = trace.get(cell.col, row, cell.rot);
@@ -174,6 +210,8 @@ pub fn isSatisfied(evals: []const F) bool {
     return true;
 }
 ```
+
+**Key insight:** Constraints are only evaluated where they're valid. No wraparound, no boundary hacks. The valid range is deterministic from the constraint definition.
 
 **Output:** `[]F` — multilinear polynomial evaluations on `{0,1}^n`, ready for sumcheck.
 
@@ -357,22 +395,27 @@ test "state transition with rotation" {
     trace.set(state, 3, F.from(3));
 
     // Constraint: state[row+1] - state[row] - 1 = 0
-    const constraints = &[_]Constraint{
-        &.{
+    const constraint = Constraint{
+        .terms = &.{
             .{ .coeff = F.one, .cells = &.{.{ .col = state, .rot = 1 }} },
             .{ .coeff = F.neg_one, .cells = &.{.{ .col = state, .rot = 0 }} },
             .{ .coeff = F.neg_one, .cells = &.{} },  // constant -1
         },
     };
 
-    const evals = try evaluate(constraints, trace, allocator);
+    // Valid range: rot=1 means rows [0, 3) = rows 0, 1, 2
+    const range = constraint.validRowRange(4);
+    try expect(range.start == 0);
+    try expect(range.end == 3);
 
-    // Rows 0, 1, 2 should satisfy (next - current = 1)
+    const evals = try evaluate(&.{constraint}, trace, allocator);
+
+    // Rows 0, 1, 2 are evaluated and satisfied
     try expect(evals[0].isZero());
     try expect(evals[1].isZero());
     try expect(evals[2].isZero());
-    // Row 3 wraps: state[0] - state[3] - 1 = 0 - 3 - 1 = -4 ≠ 0
-    try expect(!evals[3].isZero());
+    // Row 3 is NOT evaluated (out of valid range), so remains zero
+    try expect(evals[3].isZero());
 }
 ```
 
@@ -385,13 +428,18 @@ test "fibonacci via rotation - single column" {
     trace.markPublic(fib);
 
     // fib[row] + fib[row+1] = fib[row+2]
-    const constraints = &[_]Constraint{
-        &.{
+    const constraint = Constraint{
+        .terms = &.{
             .{ .coeff = F.one, .cells = &.{.{ .col = fib, .rot = 0 }} },
             .{ .coeff = F.one, .cells = &.{.{ .col = fib, .rot = 1 }} },
             .{ .coeff = F.neg_one, .cells = &.{.{ .col = fib, .rot = 2 }} },
         },
     };
+
+    // Valid range: rot=2 means rows [0, 6) = rows 0-5
+    const range = constraint.validRowRange(8);
+    try expect(range.start == 0);
+    try expect(range.end == 6);
 
     // Fill: 1, 1, 2, 3, 5, 8, 13, 21
     const fibs = [_]u32{ 1, 1, 2, 3, 5, 8, 13, 21 };
@@ -399,13 +447,15 @@ test "fibonacci via rotation - single column" {
         trace.set(fib, i, F.from(v));
     }
 
-    const evals = try evaluate(constraints, trace, allocator);
+    const evals = try evaluate(&.{constraint}, trace, allocator);
 
-    // Rows 0-5 satisfy the constraint
+    // All evaluated rows (0-5) satisfy the constraint
     for (0..6) |i| {
         try expect(evals[i].isZero());
     }
-    // Rows 6-7 wrap around and won't satisfy
+    // Rows 6-7 are NOT evaluated (out of range), remain zero
+    try expect(evals[6].isZero());
+    try expect(evals[7].isZero());
 }
 ```
 
@@ -444,20 +494,21 @@ test "builder - chained arithmetic" {
 
 ## Implementation Order
 
-### Step 1: Core Types (~30 lines)
-- [ ] `Cell`, `Term`, `Constraint` type definitions
-- [ ] Unit tests for type construction
+### Step 1: Core Types (~40 lines)
+- [ ] `Cell`, `Term` type definitions
+- [ ] `Constraint` with `validRowRange()`
+- [ ] Unit tests for type construction and range computation
 
 ### Step 2: Trace (~50 lines)
 - [ ] `Trace` struct with column storage
-- [ ] `addColumn()`, `set()`, `get()` with rotation
+- [ ] `addColumn()`, `set()`, `get()` with rotation (bounds-checked, no wrap)
 - [ ] `markPublic()`, `getPublicValues()`
-- [ ] Tests for rotation wraparound
+- [ ] Tests for rotation bounds checking
 
 ### Step 3: Evaluation (~30 lines)
-- [ ] `evaluate(constraints, trace)` → `[]F`
+- [ ] `evaluate(constraints, trace)` → `[]F` (respects valid row ranges)
 - [ ] `isSatisfied(evals)` helper
-- [ ] Tests: mul gate, add gate, invalid witness
+- [ ] Tests: mul gate, add gate, invalid witness, rotation ranges
 
 ### Step 4: Builder (~80 lines, optional)
 - [ ] `CircuitBuilder` struct
@@ -557,7 +608,7 @@ Trace + Lookups → lookup_evals ──────────┘
 3. **Column-major storage**: Cache-friendly for polynomial ops
 4. **Builder is optional**: Power users can construct constraints directly
 5. **No matrices**: Direct cell references, not CCS matrix indirection
-6. **Wraparound rotation**: Simplifies implementation, matches FFT domain
+6. **Bounded row ranges**: Each constraint computes its valid row range from rotations — no wraparound, deterministic at definition time
 
 ---
 
@@ -580,6 +631,6 @@ Trace + Lookups → lookup_evals ──────────┘
 | M3/Binius | Add `column_type: TowerLevel` field |
 | Copy constraints | Add `Permutation` argument |
 
-The `columns: [][]F` storage and `Cell`/`Term`/`Constraint` types will not change.
+The `columns: [][]F` storage and `Cell`/`Term`/`Constraint` types (with `validRowRange()`) will not change.
 
 Ready to implement when approved.
