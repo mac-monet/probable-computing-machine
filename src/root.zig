@@ -17,8 +17,8 @@ pub const merkle = @import("merkle/root.zig");
 // Re-export constraint system
 pub const constraint = @import("constraint/constraint.zig");
 
-// Re-export trace system
-pub const trace = @import("trace/trace.zig");
+// Re-export trace system (constraint trace, not vm trace)
+pub const trace = @import("constraint/trace.zig");
 
 // Re-export VM modules
 pub const vm = struct {
@@ -65,7 +65,5 @@ test {
 
     // Constraint system
     _ = @import("constraint/constraint.zig");
-
-    // Trace system
-    _ = @import("trace/trace.zig");
+    _ = @import("constraint/trace.zig");
 }
