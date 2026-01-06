@@ -12,30 +12,39 @@ bd close <id>         # Complete work
 bd sync               # Sync with remote
 ```
 
-## Landing the Plane (Session Completion)
+## Completing an Issue
 
-**When ending a work session**, you MUST complete ALL steps below. Work is NOT complete until `jj git push` succeeds.
+When you finish an issue:
+
+1. **Commit your changes** - `jj commit -m "..."`
+2. **Run quality gates** (if code changed) - Tests, linters, builds
+3. **Close the issue** - `bd close <id>`
+4. **File issues for remaining work** - Create issues for anything that needs follow-up
+
+Do NOT push after individual issues - continue working on the next issue in the epic.
+
+## Landing the Plane (Epic Completion)
+
+**When completing an epic**, you MUST complete ALL steps below. An epic is NOT complete until `jj git push` succeeds.
 
 **MANDATORY WORKFLOW:**
 
-1. **Describe your changes** - `jj describe -m "..."` for each change, `jj new` between logical units
-2. **File issues for remaining work** - Create issues for anything that needs follow-up
-3. **Run quality gates** (if code changed) - Tests, linters, builds
-4. **Update issue status** - Close finished work, update in-progress items
-5. **PUSH TO REMOTE** - This is MANDATORY:
+1. **Verify all issues in the epic are closed** - `bd epic show <id>`
+2. **Run quality gates** - Tests, linters, builds for the full changeset
+3. **Clean up** - Abandon empty changes, clean up bookmarks
+4. **PUSH TO REMOTE** - This is MANDATORY:
    ```bash
    jj git fetch
    bd sync
    jj git push
    jj log -r 'remote_bookmarks()'  # Verify remote is synced
    ```
-6. **Clean up** - Abandon empty changes, clean up bookmarks
-7. **Verify** - All changes committed AND pushed
-8. **Hand off** - Provide context for next session
+5. **Close the epic** - `bd close <epic-id>`
+6. **Hand off** - Provide context for next session
 
 **CRITICAL RULES:**
-- Work is NOT complete until `jj git push` succeeds
-- NEVER stop before pushing - that leaves work stranded locally
+- An epic is NOT complete until `jj git push` succeeds
+- NEVER stop before pushing when finishing an epic - that leaves work stranded locally
 - NEVER say "ready to push when you are" - YOU must push
 - If push fails, resolve and retry until it succeeds
 

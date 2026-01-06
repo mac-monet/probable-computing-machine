@@ -48,7 +48,7 @@ These decisions were made during design review:
 
 | Decision | Choice | Rationale |
 |----------|--------|-----------|
-| Field type | Import from `field.zig` | Use existing field implementation |
+| Field type | Generic `comptime F: type` | Modules parameterized by field, use Mersenne31 for tests |
 | Rotation type | `i32` | Match Plonky3, no artificial limits |
 | Term representation | Tagged union `{ product, constant }` | Explicit constant handling |
 | Public inputs | Embedded in trace (marked columns) | Simpler for MVP |
@@ -64,148 +64,143 @@ These decisions were made during design review:
 
 ## Phase 1: Core Data Structures
 
-### 1.1 Cell and Term Types
+### 1.1 Module Structure
+
+The constraint system is **generic over field type F**. Cell is field-independent; all other types are parameterized.
 
 ```zig
 // constraint.zig
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const F = @import("../field.zig").Field;
 
-/// A cell reference: column at row offset
+/// A cell reference: column at row offset (field-independent)
 pub const Cell = struct {
     col: usize,
     rot: i32 = 0,  // 0 = current row, 1 = next, -1 = prev
 };
 
-/// A term in a constraint polynomial
-/// Either a constant value or a coefficient times a product of cells
-pub const Term = union(enum) {
-    /// Constant term (e.g., -5 in "a*b - 5 = 0")
-    constant: F,
+/// Constraint system parameterized by field type.
+/// Usage:
+///   const F = @import("../fields/mersenne31.zig").Mersenne31;
+///   const CS = ConstraintSystem(F);
+///   const trace = CS.Trace;
+///   const constraint = CS.Constraint;
+pub fn ConstraintSystem(comptime F: type) type {
+    return struct {
+        pub const Field = F;
 
-    /// Product term: coefficient × product of cells
-    product: struct {
-        coeff: F,
-        cells: []const Cell,
-    },
+        // Forward declaration for Trace (defined in trace.zig, imported here)
+        pub const Trace = @import("trace.zig").Trace(F);
 
-    /// Evaluate this term at a given row
-    pub fn evaluate(self: Term, trace: *const Trace, row: usize) !F {
-        return switch (self) {
-            .constant => |c| c,
-            .product => |p| {
-                var result = p.coeff;
-                for (p.cells) |cell| {
-                    const val = try trace.get(cell.col, row, cell.rot);
-                    result = result.mul(val);
-                }
-                return result;
+        /// A term: constant or coefficient × product of cells
+        pub const Term = union(enum) {
+            constant: F,
+            product: struct {
+                coeff: F,
+                cells: []const Cell,
             },
-        };
-    }
-};
-```
 
-### 1.2 Constraint Type
-
-```zig
-/// A constraint: sum of terms that must equal zero
-pub const Constraint = struct {
-    terms: []const Term,
-
-    /// Compute valid row range from rotations in terms
-    /// A constraint with rot=1 is valid for rows [0, num_rows-1)
-    /// A constraint with rot=-1 is valid for rows [1, num_rows)
-    pub fn validRowRange(self: Constraint, num_rows: usize) !struct { start: usize, end: usize } {
-        var min_rot: i32 = 0;
-        var max_rot: i32 = 0;
-
-        for (self.terms) |term| {
-            switch (term) {
-                .constant => {},
-                .product => |p| {
-                    for (p.cells) |cell| {
-                        min_rot = @min(min_rot, cell.rot);
-                        max_rot = @max(max_rot, cell.rot);
-                    }
-                },
-            }
-        }
-
-        // If min_rot = -1, start = 1 (can't access row -1)
-        // If max_rot = 2, end = num_rows - 2 (can't access beyond last row)
-        const start: usize = if (min_rot < 0) @intCast(-min_rot) else 0;
-        const end_offset: usize = @intCast(max_rot);
-
-        // Check if constraint is compatible with trace size
-        if (start >= num_rows or end_offset >= num_rows) {
-            return error.InvalidRowRange;
-        }
-
-        const end: usize = num_rows - end_offset;
-        if (start >= end) {
-            return error.InvalidRowRange;
-        }
-
-        return .{ .start = start, .end = end };
-    }
-
-    /// Evaluate this constraint at a specific row
-    pub fn evaluate(self: Constraint, trace: *const Trace, row: usize) !F {
-        var sum = F.zero;
-        for (self.terms) |term| {
-            const val = try term.evaluate(trace, row);
-            sum = sum.add(val);
-        }
-        return sum;
-    }
-};
-```
-
-### 1.3 ConstraintSet
-
-```zig
-pub const ConstraintSet = struct {
-    constraints: std.ArrayList(Constraint),
-    allocator: Allocator,
-    trace: *const Trace,  // Reference for column bounds checking
-
-    pub fn init(allocator: Allocator, trace: *const Trace) ConstraintSet {
-        return .{
-            .constraints = std.ArrayList(Constraint).init(allocator),
-            .allocator = allocator,
-            .trace = trace,
-        };
-    }
-
-    pub fn deinit(self: *ConstraintSet) void {
-        self.constraints.deinit();
-    }
-
-    /// Add a constraint, validating column references
-    pub fn add(self: *ConstraintSet, terms: []const Term) !void {
-        // Validate all column references
-        for (terms) |term| {
-            switch (term) {
-                .constant => {},
-                .product => |p| {
-                    for (p.cells) |cell| {
-                        if (cell.col >= self.trace.numColumns()) {
-                            return error.InvalidColumn;
+            pub fn evaluate(self: Term, trace: *const Trace, row: usize) !F {
+                return switch (self) {
+                    .constant => |c| c,
+                    .product => |p| {
+                        var result = p.coeff;
+                        for (p.cells) |cell| {
+                            const val = try trace.get(cell.col, row, cell.rot);
+                            result = result.mul(val);
                         }
-                    }
-                },
+                        return result;
+                    },
+                };
             }
-        }
-        try self.constraints.append(.{ .terms = terms });
-    }
+        };
 
-    pub fn len(self: ConstraintSet) usize {
-        return self.constraints.items.len;
-    }
-};
+        /// A constraint: sum of terms that must equal zero
+        pub const Constraint = struct {
+            terms: []const Term,
+
+            pub fn validRowRange(self: Constraint, num_rows: usize) !struct { start: usize, end: usize } {
+                var min_rot: i32 = 0;
+                var max_rot: i32 = 0;
+
+                for (self.terms) |term| {
+                    switch (term) {
+                        .constant => {},
+                        .product => |p| {
+                            for (p.cells) |cell| {
+                                min_rot = @min(min_rot, cell.rot);
+                                max_rot = @max(max_rot, cell.rot);
+                            }
+                        },
+                    }
+                }
+
+                const start: usize = if (min_rot < 0) @intCast(-min_rot) else 0;
+                const end_offset: usize = @intCast(max_rot);
+
+                if (start >= num_rows or end_offset >= num_rows) {
+                    return error.InvalidRowRange;
+                }
+
+                const end: usize = num_rows - end_offset;
+                if (start >= end) {
+                    return error.InvalidRowRange;
+                }
+
+                return .{ .start = start, .end = end };
+            }
+
+            pub fn evaluate(self: Constraint, trace: *const Trace, row: usize) !F {
+                var sum = F.zero;
+                for (self.terms) |term| {
+                    const val = try term.evaluate(trace, row);
+                    sum = sum.add(val);
+                }
+                return sum;
+            }
+        };
+
+        /// Collection of constraints with column validation
+        pub const ConstraintSet = struct {
+            constraints: std.ArrayList(Constraint),
+            allocator: Allocator,
+            trace: *const Trace,
+
+            pub fn init(allocator: Allocator, trace: *const Trace) ConstraintSet {
+                return .{
+                    .constraints = std.ArrayList(Constraint).init(allocator),
+                    .allocator = allocator,
+                    .trace = trace,
+                };
+            }
+
+            pub fn deinit(self: *ConstraintSet) void {
+                self.constraints.deinit();
+            }
+
+            pub fn add(self: *ConstraintSet, terms: []const Term) !void {
+                for (terms) |term| {
+                    switch (term) {
+                        .constant => {},
+                        .product => |p| {
+                            for (p.cells) |cell| {
+                                if (cell.col >= self.trace.numColumns()) {
+                                    return error.InvalidColumn;
+                                }
+                            }
+                        },
+                    }
+                }
+                try self.constraints.append(.{ .terms = terms });
+            }
+
+            pub fn len(self: ConstraintSet) usize {
+                return self.constraints.items.len;
+            }
+        };
+    };
+}
 ```
 
 ---
@@ -217,9 +212,11 @@ pub const ConstraintSet = struct {
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const F = @import("../field.zig").Field;
 
-pub const Trace = struct {
+/// Trace parameterized by field type
+pub fn Trace(comptime F: type) type {
+    return struct {
+        const Self = @This();
     allocator: Allocator,
 
     /// Number of rows (must be power of 2)
@@ -331,7 +328,8 @@ pub const Trace = struct {
         }
         return result;
     }
-};
+    };
+}
 ```
 
 **Key points:**
@@ -344,8 +342,10 @@ pub const Trace = struct {
 
 ## Phase 3: Constraint Evaluation
 
+These functions are inside `ConstraintSystem(F)`:
+
 ```zig
-// constraint.zig (continued)
+// Inside ConstraintSystem(comptime F: type) { return struct { ...
 
 /// Evaluate constraints over trace, returns polynomial evaluations
 /// Each constraint is only evaluated on rows where all rotations are valid
@@ -419,15 +419,19 @@ Ergonomic layer for common patterns. Not required — you can construct constrai
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const F = @import("../field.zig").Field;
 const constraint_mod = @import("constraint.zig");
-const Trace = @import("trace.zig").Trace;
 const Cell = constraint_mod.Cell;
-const Term = constraint_mod.Term;
-const Constraint = constraint_mod.Constraint;
-const ConstraintSet = constraint_mod.ConstraintSet;
 
-pub const CircuitBuilder = struct {
+/// Builder parameterized by field type
+pub fn CircuitBuilder(comptime F: type) type {
+    const CS = constraint_mod.ConstraintSystem(F);
+    const Trace = CS.Trace;
+    const Term = CS.Term;
+    const Constraint = CS.Constraint;
+    const ConstraintSet = CS.ConstraintSet;
+
+    return struct {
+        const Self = @This();
     allocator: Allocator,
     trace: Trace,
     constraints: ConstraintSet,
@@ -551,10 +555,11 @@ pub const CircuitBuilder = struct {
 
     // === Internal helpers ===
 
-    fn cellSlice(self: *CircuitBuilder, cells: []const Cell) ![]const Cell {
+    fn cellSlice(self: *Self, cells: []const Cell) ![]const Cell {
         return self.allocator.dupe(Cell, cells);
     }
-};
+    };
+}
 ```
 
 ---
@@ -566,24 +571,45 @@ Minimal stub for testing constraint satisfaction. Real protocol integration come
 ```zig
 // protocol_stub.zig
 
-const F = @import("../field.zig").Field;
 const constraint_mod = @import("constraint.zig");
 
-/// Stub prover - just checks constraint satisfaction
-/// Real implementation will: commit → sumcheck → PCS.open
-pub fn prove(evals: []const F) bool {
-    return constraint_mod.isSatisfied(evals) == null;
-}
+/// Protocol stub parameterized by field type
+pub fn ProtocolStub(comptime F: type) type {
+    const CS = constraint_mod.ConstraintSystem(F);
 
-/// Stub verifier - placeholder
-pub fn verify(_: []const F) bool {
-    return true;
+    return struct {
+        /// Stub prover - just checks constraint satisfaction
+        /// Real implementation will: commit → sumcheck → PCS.open
+        pub fn prove(evals: []const F) bool {
+            return CS.isSatisfied(evals) == null;
+        }
+
+        /// Stub verifier - placeholder
+        pub fn verify(_: []const F) bool {
+            return true;
+        }
+    };
 }
 ```
 
 ---
 
 ## Phase 6: Testing
+
+All tests use Mersenne31 field and import types from the generic ConstraintSystem:
+
+```zig
+// Test setup (at top of test file)
+const std = @import("std");
+const F = @import("../fields/mersenne31.zig").Mersenne31;
+const CS = @import("constraint.zig").ConstraintSystem(F);
+const Cell = @import("constraint.zig").Cell;
+const Trace = CS.Trace;
+const Term = CS.Term;
+const Constraint = CS.Constraint;
+const evaluate = CS.evaluate;
+const isSatisfied = CS.isSatisfied;
+```
 
 ### 6.1 Multiplication Constraint
 
@@ -599,9 +625,9 @@ test "multiplication constraint" {
     const c = try trace.addColumn();
 
     // 3 * 7 = 21
-    try trace.set(a, 0, F.from(3));
-    try trace.set(b, 0, F.from(7));
-    try trace.set(c, 0, F.from(21));
+    try trace.set(a, 0, F.fromU64(3));
+    try trace.set(b, 0, F.fromU64(7));
+    try trace.set(c, 0, F.fromU64(21));
 
     // Pad remaining rows
     for (1..4) |row| {
@@ -634,9 +660,9 @@ test "invalid witness produces non-zero" {
     const c = try trace.addColumn();
 
     // 3 * 7 = 20 (WRONG)
-    try trace.set(a, 0, F.from(3));
-    try trace.set(b, 0, F.from(7));
-    try trace.set(c, 0, F.from(20));
+    try trace.set(a, 0, F.fromU64(3));
+    try trace.set(b, 0, F.fromU64(7));
+    try trace.set(c, 0, F.fromU64(20));
 
     for (1..4) |row| {
         try trace.set(a, row, F.zero);
@@ -670,10 +696,10 @@ test "state transition with rotation" {
     const state = try trace.addColumn();
 
     // state[i+1] = state[i] + 1 (counting)
-    try trace.set(state, 0, F.from(0));
-    try trace.set(state, 1, F.from(1));
-    try trace.set(state, 2, F.from(2));
-    try trace.set(state, 3, F.from(3));
+    try trace.set(state, 0, F.fromU64(0));
+    try trace.set(state, 1, F.fromU64(1));
+    try trace.set(state, 2, F.fromU64(2));
+    try trace.set(state, 3, F.fromU64(3));
 
     // Constraint: state[row+1] - state[row] - 1 = 0
     const terms = &[_]Term{
@@ -723,7 +749,7 @@ test "fibonacci via rotation - single column" {
     // Fill: 1, 1, 2, 3, 5, 8, 13, 21
     const fibs = [_]u32{ 1, 1, 2, 3, 5, 8, 13, 21 };
     for (fibs, 0..) |v, i| {
-        try trace.set(fib, i, F.from(v));
+        try trace.set(fib, i, F.fromU64(v));
     }
 
     const evals = try evaluate(&.{constraint}, &trace, allocator);
@@ -754,11 +780,11 @@ test "builder - chained arithmetic" {
     try builder.addGate(t, c, out);
 
     // Witness: (3 * 7) + 5 = 26
-    try builder.set(a, 0, F.from(3));
-    try builder.set(b, 0, F.from(7));
-    try builder.set(t, 0, F.from(21));
-    try builder.set(c, 0, F.from(5));
-    try builder.set(out, 0, F.from(26));
+    try builder.set(a, 0, F.fromU64(3));
+    try builder.set(b, 0, F.fromU64(7));
+    try builder.set(t, 0, F.fromU64(21));
+    try builder.set(c, 0, F.fromU64(5));
+    try builder.set(out, 0, F.fromU64(26));
 
     // Pad remaining rows
     for (1..4) |row| {
