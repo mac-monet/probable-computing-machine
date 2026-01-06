@@ -44,6 +44,57 @@ pub fn ConstraintSystem(comptime F: type) type {
                 };
             }
         };
+
+        /// A constraint: sum of terms that must equal zero
+        pub const Constraint = struct {
+            terms: []const Term,
+
+            /// Compute the valid row range for evaluating this constraint.
+            /// Returns the range [start, end) of rows where all rotations are in bounds.
+            /// Returns error.InvalidRowRange if the constraint cannot be evaluated on any rows.
+            pub fn validRowRange(self: Constraint, num_rows: usize) !struct { start: usize, end: usize } {
+                var min_rot: i32 = 0;
+                var max_rot: i32 = 0;
+
+                for (self.terms) |term| {
+                    switch (term) {
+                        .constant => {},
+                        .product => |p| {
+                            for (p.cells) |cell| {
+                                min_rot = @min(min_rot, cell.rot);
+                                max_rot = @max(max_rot, cell.rot);
+                            }
+                        },
+                    }
+                }
+
+                const start: usize = if (min_rot < 0) @intCast(-min_rot) else 0;
+                const end_offset: usize = @intCast(max_rot);
+
+                if (start >= num_rows or end_offset >= num_rows) {
+                    return error.InvalidRowRange;
+                }
+
+                const end: usize = num_rows - end_offset;
+                if (start >= end) {
+                    return error.InvalidRowRange;
+                }
+
+                return .{ .start = start, .end = end };
+            }
+
+            /// Evaluate this constraint at a specific row.
+            /// Returns the sum of all terms evaluated at the given row.
+            /// For a satisfied constraint, this should return zero.
+            pub fn evaluate(self: Constraint, trace: *const Trace, row: usize) !F {
+                var sum = F.zero;
+                for (self.terms) |term| {
+                    const val = try term.evaluate(trace, row);
+                    sum = sum.add(val);
+                }
+                return sum;
+            }
+        };
     };
 }
 
@@ -172,4 +223,202 @@ test "Term: evaluate returns error on unset cell" {
     const term = CS.Term{ .product = .{ .coeff = M31.one, .cells = cells } };
 
     try testing.expectError(error.CellNotSet, term.evaluate(&trace, 0));
+}
+
+// ============ Constraint Tests ============ //
+
+test "Constraint: validRowRange with no rotations" {
+    // Constraint with rot=0 should be valid on all rows
+    const terms = &[_]CS.Term{
+        .{ .product = .{ .coeff = M31.one, .cells = &.{.{ .col = 0, .rot = 0 }} } },
+    };
+    const constraint = CS.Constraint{ .terms = terms };
+
+    const range = try constraint.validRowRange(4);
+    try testing.expectEqual(@as(usize, 0), range.start);
+    try testing.expectEqual(@as(usize, 4), range.end);
+}
+
+test "Constraint: validRowRange with positive rotation" {
+    // Constraint with rot=1 should be valid on rows [0, num_rows-1)
+    const terms = &[_]CS.Term{
+        .{ .product = .{ .coeff = M31.one, .cells = &.{.{ .col = 0, .rot = 1 }} } },
+    };
+    const constraint = CS.Constraint{ .terms = terms };
+
+    const range = try constraint.validRowRange(4);
+    try testing.expectEqual(@as(usize, 0), range.start);
+    try testing.expectEqual(@as(usize, 3), range.end);
+}
+
+test "Constraint: validRowRange with negative rotation" {
+    // Constraint with rot=-1 should be valid on rows [1, num_rows)
+    const terms = &[_]CS.Term{
+        .{ .product = .{ .coeff = M31.one, .cells = &.{.{ .col = 0, .rot = -1 }} } },
+    };
+    const constraint = CS.Constraint{ .terms = terms };
+
+    const range = try constraint.validRowRange(4);
+    try testing.expectEqual(@as(usize, 1), range.start);
+    try testing.expectEqual(@as(usize, 4), range.end);
+}
+
+test "Constraint: validRowRange with mixed rotations" {
+    // rot=-1 and rot=2 should give valid range [1, num_rows-2)
+    const terms = &[_]CS.Term{
+        .{ .product = .{ .coeff = M31.one, .cells = &.{.{ .col = 0, .rot = -1 }} } },
+        .{ .product = .{ .coeff = M31.one, .cells = &.{.{ .col = 0, .rot = 2 }} } },
+    };
+    const constraint = CS.Constraint{ .terms = terms };
+
+    const range = try constraint.validRowRange(8);
+    try testing.expectEqual(@as(usize, 1), range.start);
+    try testing.expectEqual(@as(usize, 6), range.end);
+}
+
+test "Constraint: validRowRange with constants ignored" {
+    // Constants don't affect the row range
+    const terms = &[_]CS.Term{
+        .{ .constant = M31.fromU64(42) },
+        .{ .product = .{ .coeff = M31.one, .cells = &.{.{ .col = 0, .rot = 1 }} } },
+    };
+    const constraint = CS.Constraint{ .terms = terms };
+
+    const range = try constraint.validRowRange(4);
+    try testing.expectEqual(@as(usize, 0), range.start);
+    try testing.expectEqual(@as(usize, 3), range.end);
+}
+
+test "Constraint: validRowRange error on too few rows" {
+    // With rot=2, need at least 3 rows (rows 0,1 can evaluate)
+    const terms = &[_]CS.Term{
+        .{ .product = .{ .coeff = M31.one, .cells = &.{.{ .col = 0, .rot = 2 }} } },
+    };
+    const constraint = CS.Constraint{ .terms = terms };
+
+    try testing.expectError(error.InvalidRowRange, constraint.validRowRange(2));
+}
+
+test "Constraint: validRowRange error when start >= end" {
+    // With rot=-2 and rot=2 on 4 rows: start=2, end=2, invalid
+    const terms = &[_]CS.Term{
+        .{ .product = .{ .coeff = M31.one, .cells = &.{.{ .col = 0, .rot = -2 }} } },
+        .{ .product = .{ .coeff = M31.one, .cells = &.{.{ .col = 0, .rot = 2 }} } },
+    };
+    const constraint = CS.Constraint{ .terms = terms };
+
+    try testing.expectError(error.InvalidRowRange, constraint.validRowRange(4));
+}
+
+test "Constraint: evaluate multiplication gate" {
+    var trace = try CS.Trace.init(testing.allocator, 4);
+    defer trace.deinit();
+
+    const a = try trace.addColumn();
+    const b = try trace.addColumn();
+    const c = try trace.addColumn();
+
+    // 3 * 7 = 21
+    try trace.set(a, 0, M31.fromU64(3));
+    try trace.set(b, 0, M31.fromU64(7));
+    try trace.set(c, 0, M31.fromU64(21));
+
+    // Constraint: a * b - c = 0
+    const terms = &[_]CS.Term{
+        .{ .product = .{ .coeff = M31.one, .cells = &.{ .{ .col = a }, .{ .col = b } } } },
+        .{ .product = .{ .coeff = M31.one.neg(), .cells = &.{.{ .col = c }} } },
+    };
+    const constraint = CS.Constraint{ .terms = terms };
+
+    const result = try constraint.evaluate(&trace, 0);
+    try testing.expect(result.isZero());
+}
+
+test "Constraint: evaluate invalid witness produces non-zero" {
+    var trace = try CS.Trace.init(testing.allocator, 4);
+    defer trace.deinit();
+
+    const a = try trace.addColumn();
+    const b = try trace.addColumn();
+    const c = try trace.addColumn();
+
+    // 3 * 7 = 20 (WRONG - should be 21)
+    try trace.set(a, 0, M31.fromU64(3));
+    try trace.set(b, 0, M31.fromU64(7));
+    try trace.set(c, 0, M31.fromU64(20));
+
+    // Constraint: a * b - c = 0
+    const terms = &[_]CS.Term{
+        .{ .product = .{ .coeff = M31.one, .cells = &.{ .{ .col = a }, .{ .col = b } } } },
+        .{ .product = .{ .coeff = M31.one.neg(), .cells = &.{.{ .col = c }} } },
+    };
+    const constraint = CS.Constraint{ .terms = terms };
+
+    const result = try constraint.evaluate(&trace, 0);
+    // 3 * 7 - 20 = 1
+    try testing.expect(result.eql(M31.one));
+}
+
+test "Constraint: evaluate state transition with rotation" {
+    var trace = try CS.Trace.init(testing.allocator, 4);
+    defer trace.deinit();
+
+    const state = try trace.addColumn();
+
+    // state[i+1] = state[i] + 1 (counting)
+    try trace.set(state, 0, M31.fromU64(0));
+    try trace.set(state, 1, M31.fromU64(1));
+    try trace.set(state, 2, M31.fromU64(2));
+    try trace.set(state, 3, M31.fromU64(3));
+
+    // Constraint: state[row+1] - state[row] - 1 = 0
+    const terms = &[_]CS.Term{
+        .{ .product = .{ .coeff = M31.one, .cells = &.{.{ .col = state, .rot = 1 }} } },
+        .{ .product = .{ .coeff = M31.one.neg(), .cells = &.{.{ .col = state, .rot = 0 }} } },
+        .{ .constant = M31.one.neg() },
+    };
+    const constraint = CS.Constraint{ .terms = terms };
+
+    // Valid range should be [0, 3)
+    const range = try constraint.validRowRange(4);
+    try testing.expectEqual(@as(usize, 0), range.start);
+    try testing.expectEqual(@as(usize, 3), range.end);
+
+    // Evaluate at each valid row
+    for (range.start..range.end) |row| {
+        const result = try constraint.evaluate(&trace, row);
+        try testing.expect(result.isZero());
+    }
+}
+
+test "Constraint: evaluate fibonacci via rotation" {
+    var trace = try CS.Trace.init(testing.allocator, 8);
+    defer trace.deinit();
+
+    const fib = try trace.addColumn();
+
+    // Fill: 1, 1, 2, 3, 5, 8, 13, 21
+    const fibs = [_]u32{ 1, 1, 2, 3, 5, 8, 13, 21 };
+    for (fibs, 0..) |v, i| {
+        try trace.set(fib, i, M31.fromU64(v));
+    }
+
+    // Constraint: fib[row] + fib[row+1] - fib[row+2] = 0
+    const terms = &[_]CS.Term{
+        .{ .product = .{ .coeff = M31.one, .cells = &.{.{ .col = fib, .rot = 0 }} } },
+        .{ .product = .{ .coeff = M31.one, .cells = &.{.{ .col = fib, .rot = 1 }} } },
+        .{ .product = .{ .coeff = M31.one.neg(), .cells = &.{.{ .col = fib, .rot = 2 }} } },
+    };
+    const constraint = CS.Constraint{ .terms = terms };
+
+    // Valid range: rot=2 means rows [0, 6)
+    const range = try constraint.validRowRange(8);
+    try testing.expectEqual(@as(usize, 0), range.start);
+    try testing.expectEqual(@as(usize, 6), range.end);
+
+    // Evaluate at each valid row
+    for (range.start..range.end) |row| {
+        const result = try constraint.evaluate(&trace, row);
+        try testing.expect(result.isZero());
+    }
 }

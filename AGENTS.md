@@ -16,13 +16,14 @@ bd sync               # Sync with remote
 
 When you finish an issue:
 
-1. **Commit your changes** - `jj commit -m "..."`
-2. **Run quality gates** (if code changed) - Tests, linters, builds
-3. **Verify implementation against spec** - Use the Task tool to spawn a subagent that:
-   - Re-reads the issue spec (`bd show <id>`)
-   - Reviews your implementation against each requirement
+1. **Verify implementation against spec** - Use the Task tool to spawn a subagent that:
+   - Re-reads the issue (`bd show <id>`)
+   - Finds and reads any linked spec files (look for "See spec/..." or similar references in the description)
+   - Reviews your implementation against each requirement in the issue AND spec
    - Reports any missing or incomplete items
    - If gaps are found, address them before proceeding
+2. **Commit your changes** - `jj commit -m "..."`
+3. **Run quality gates** (if code changed) - Tests, linters, builds
 4. **Close the issue** - `bd close <id>`
 5. **File issues for remaining work** - Create issues for anything that needs follow-up
 
