@@ -18,8 +18,13 @@ When you finish an issue:
 
 1. **Commit your changes** - `jj commit -m "..."`
 2. **Run quality gates** (if code changed) - Tests, linters, builds
-3. **Close the issue** - `bd close <id>`
-4. **File issues for remaining work** - Create issues for anything that needs follow-up
+3. **Verify implementation against spec** - Use the Task tool to spawn a subagent that:
+   - Re-reads the issue spec (`bd show <id>`)
+   - Reviews your implementation against each requirement
+   - Reports any missing or incomplete items
+   - If gaps are found, address them before proceeding
+4. **Close the issue** - `bd close <id>`
+5. **File issues for remaining work** - Create issues for anything that needs follow-up
 
 Do NOT push after individual issues - continue working on the next issue in the epic.
 

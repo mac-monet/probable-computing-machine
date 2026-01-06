@@ -19,6 +19,9 @@ pub fn Trace(comptime F: type) type {
         /// Track which cells have been set (for error detection)
         set_flags: std.ArrayListUnmanaged([]bool),
 
+        /// Which columns are public (for verification)
+        public_columns: std.ArrayListUnmanaged(usize),
+
         pub fn init(allocator: Allocator, num_rows: usize) !Self {
             // Validate power of 2
             if (num_rows == 0 or (num_rows & (num_rows - 1)) != 0) {
@@ -29,6 +32,7 @@ pub fn Trace(comptime F: type) type {
                 .num_rows = num_rows,
                 .columns = .{},
                 .set_flags = .{},
+                .public_columns = .{},
             };
         }
 
@@ -41,6 +45,7 @@ pub fn Trace(comptime F: type) type {
             }
             self.columns.deinit(self.allocator);
             self.set_flags.deinit(self.allocator);
+            self.public_columns.deinit(self.allocator);
         }
 
         /// Add a column, returns column index
@@ -60,6 +65,25 @@ pub fn Trace(comptime F: type) type {
         /// Number of columns
         pub fn numColumns(self: Self) usize {
             return self.columns.items.len;
+        }
+
+        /// Mark a column as public
+        pub fn markPublic(self: *Self, col: usize) !void {
+            if (col >= self.columns.items.len) {
+                return error.InvalidColumn;
+            }
+            try self.public_columns.append(self.allocator, col);
+        }
+
+        /// Extract public column values (for verifier)
+        pub fn getPublicValues(self: Self, allocator: Allocator) ![][]F {
+            var result = try allocator.alloc([]F, self.public_columns.items.len);
+            errdefer allocator.free(result);
+
+            for (self.public_columns.items, 0..) |col_idx, i| {
+                result[i] = try allocator.dupe(F, self.columns.items[col_idx]);
+            }
+            return result;
         }
 
         /// Set a cell value
@@ -209,4 +233,77 @@ test "Trace: get returns error on unset cell" {
     // Column added but no values set
 
     try testing.expectError(error.CellNotSet, trace.get(col, 0, 0));
+}
+
+test "Trace: markPublic validates column" {
+    var trace = try Trace(M31).init(testing.allocator, 4);
+    defer trace.deinit();
+
+    // No columns exist yet
+    try testing.expectError(error.InvalidColumn, trace.markPublic(0));
+
+    const col = try trace.addColumn();
+    try trace.markPublic(col);
+
+    // Invalid column index
+    try testing.expectError(error.InvalidColumn, trace.markPublic(99));
+}
+
+test "Trace: getPublicValues returns empty for no public columns" {
+    var trace = try Trace(M31).init(testing.allocator, 4);
+    defer trace.deinit();
+
+    _ = try trace.addColumn();
+
+    const public_vals = try trace.getPublicValues(testing.allocator);
+    defer testing.allocator.free(public_vals);
+
+    try testing.expectEqual(@as(usize, 0), public_vals.len);
+}
+
+test "Trace: getPublicValues extracts marked columns" {
+    var trace = try Trace(M31).init(testing.allocator, 4);
+    defer trace.deinit();
+
+    const a = try trace.addColumn();
+    const b = try trace.addColumn();
+    const c = try trace.addColumn();
+
+    // Set values
+    try trace.set(a, 0, M31.fromU64(10));
+    try trace.set(a, 1, M31.fromU64(20));
+    try trace.set(a, 2, M31.fromU64(30));
+    try trace.set(a, 3, M31.fromU64(40));
+
+    try trace.set(b, 0, M31.fromU64(100));
+    try trace.set(b, 1, M31.fromU64(200));
+    try trace.set(b, 2, M31.fromU64(300));
+    try trace.set(b, 3, M31.fromU64(400));
+
+    try trace.set(c, 0, M31.fromU64(1));
+    try trace.set(c, 1, M31.fromU64(2));
+    try trace.set(c, 2, M31.fromU64(3));
+    try trace.set(c, 3, M31.fromU64(4));
+
+    // Mark columns a and c as public (not b)
+    try trace.markPublic(a);
+    try trace.markPublic(c);
+
+    const public_vals = try trace.getPublicValues(testing.allocator);
+    defer {
+        for (public_vals) |col| {
+            testing.allocator.free(col);
+        }
+        testing.allocator.free(public_vals);
+    }
+
+    try testing.expectEqual(@as(usize, 2), public_vals.len);
+
+    // First public column is 'a'
+    try testing.expect(public_vals[0][0].eql(M31.fromU64(10)));
+    try testing.expect(public_vals[0][3].eql(M31.fromU64(40)));
+
+    // Second public column is 'c'
+    try testing.expect(public_vals[1][0].eql(M31.fromU64(1)));
+    try testing.expect(public_vals[1][3].eql(M31.fromU64(4)));
 }
