@@ -17,8 +17,8 @@ bd sync               # Sync with remote
 When you finish an issue:
 
 1. **Verify implementation against spec** - Use the Task tool to spawn a subagent that:
-   - Re-reads the issue (`bd show <id>`)
-   - Finds and reads any linked spec files (look for "See spec/..." or similar references in the description)
+   - Re-reads the issue (`bd show <id> --json`)
+   - Finds the parent epic and reads the spec file from its `external_ref` field
    - Reviews your implementation against each requirement in the issue AND spec
    - Reports any missing or incomplete items
    - If gaps are found, address them before proceeding
