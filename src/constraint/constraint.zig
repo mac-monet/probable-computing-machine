@@ -138,6 +138,70 @@ pub fn ConstraintSystem(comptime F: type) type {
                 return self.constraints.items.len;
             }
         };
+
+        /// Evaluate constraints over trace, returns polynomial evaluations.
+        /// Each constraint is only evaluated on rows where all rotations are valid.
+        /// Result[row] = sum of all constraint evaluations at that row.
+        /// For valid witness: all values should be zero.
+        pub fn evaluate(
+            constraints: []const Constraint,
+            trace: *const Trace,
+            allocator: std.mem.Allocator,
+        ) ![]F {
+            const num_rows = trace.num_rows;
+            var result = try allocator.alloc(F, num_rows);
+            @memset(result, F.zero);
+
+            for (constraints) |constraint| {
+                // Only evaluate on valid rows for this constraint
+                const range = try constraint.validRowRange(num_rows);
+
+                for (range.start..range.end) |row| {
+                    const val = try constraint.evaluate(trace, row);
+                    result[row] = result[row].add(val);
+                }
+            }
+
+            return result;
+        }
+
+        /// Evaluate constraints with per-constraint granularity (debug mode).
+        /// Returns [constraint_idx][row] for debugging which constraint failed where.
+        pub fn evaluateDebug(
+            constraints: []const Constraint,
+            trace: *const Trace,
+            allocator: std.mem.Allocator,
+        ) ![][]F {
+            const num_rows = trace.num_rows;
+            var result = try allocator.alloc([]F, constraints.len);
+            errdefer {
+                for (result[0..]) |maybe_row| {
+                    if (maybe_row.len > 0) allocator.free(maybe_row);
+                }
+                allocator.free(result);
+            }
+
+            for (constraints, 0..) |constraint, ci| {
+                result[ci] = try allocator.alloc(F, num_rows);
+                @memset(result[ci], F.zero);
+
+                const range = try constraint.validRowRange(num_rows);
+                for (range.start..range.end) |row| {
+                    result[ci][row] = try constraint.evaluate(trace, row);
+                }
+            }
+
+            return result;
+        }
+
+        /// Check if all constraint evaluations are zero.
+        /// Returns null if satisfied, or the first non-zero row index.
+        pub fn isSatisfied(evals: []const F) ?usize {
+            for (evals, 0..) |v, i| {
+                if (!v.isZero()) return i;
+            }
+            return null;
+        }
     };
 }
 
@@ -629,4 +693,248 @@ test "ConstraintSet: constant-only constraint always valid" {
 
     try cs.add(terms);
     try testing.expectEqual(@as(usize, 1), cs.len());
+}
+
+// ============ Evaluation Function Tests ============ //
+
+test "evaluate: multiplication constraint satisfied" {
+    var trace = try CS.Trace.init(testing.allocator, 4);
+    defer trace.deinit();
+
+    const a = try trace.addColumn();
+    const b = try trace.addColumn();
+    const c = try trace.addColumn();
+
+    // 3 * 7 = 21
+    try trace.set(a, 0, M31.fromU64(3));
+    try trace.set(b, 0, M31.fromU64(7));
+    try trace.set(c, 0, M31.fromU64(21));
+
+    // Pad remaining rows
+    for (1..4) |row| {
+        try trace.set(a, row, M31.zero);
+        try trace.set(b, row, M31.zero);
+        try trace.set(c, row, M31.zero);
+    }
+
+    // Constraint: a * b - c = 0
+    const terms = &[_]CS.Term{
+        .{ .product = .{ .coeff = M31.one, .cells = &.{ .{ .col = a }, .{ .col = b } } } },
+        .{ .product = .{ .coeff = M31.one.neg(), .cells = &.{.{ .col = c }} } },
+    };
+    const constraints = &[_]CS.Constraint{.{ .terms = terms }};
+
+    const evals = try CS.evaluate(constraints, &trace, testing.allocator);
+    defer testing.allocator.free(evals);
+
+    try testing.expect(CS.isSatisfied(evals) == null);
+}
+
+test "evaluate: invalid witness produces non-zero" {
+    var trace = try CS.Trace.init(testing.allocator, 4);
+    defer trace.deinit();
+
+    const a = try trace.addColumn();
+    const b = try trace.addColumn();
+    const c = try trace.addColumn();
+
+    // 3 * 7 = 20 (WRONG)
+    try trace.set(a, 0, M31.fromU64(3));
+    try trace.set(b, 0, M31.fromU64(7));
+    try trace.set(c, 0, M31.fromU64(20));
+
+    for (1..4) |row| {
+        try trace.set(a, row, M31.zero);
+        try trace.set(b, row, M31.zero);
+        try trace.set(c, row, M31.zero);
+    }
+
+    const terms = &[_]CS.Term{
+        .{ .product = .{ .coeff = M31.one, .cells = &.{ .{ .col = a }, .{ .col = b } } } },
+        .{ .product = .{ .coeff = M31.one.neg(), .cells = &.{.{ .col = c }} } },
+    };
+    const constraints = &[_]CS.Constraint{.{ .terms = terms }};
+
+    const evals = try CS.evaluate(constraints, &trace, testing.allocator);
+    defer testing.allocator.free(evals);
+
+    // Should fail at row 0
+    try testing.expect(CS.isSatisfied(evals) == 0);
+}
+
+test "evaluate: state transition with rotation" {
+    var trace = try CS.Trace.init(testing.allocator, 4);
+    defer trace.deinit();
+
+    const state = try trace.addColumn();
+
+    // state[i+1] = state[i] + 1 (counting)
+    try trace.set(state, 0, M31.fromU64(0));
+    try trace.set(state, 1, M31.fromU64(1));
+    try trace.set(state, 2, M31.fromU64(2));
+    try trace.set(state, 3, M31.fromU64(3));
+
+    // Constraint: state[row+1] - state[row] - 1 = 0
+    const terms = &[_]CS.Term{
+        .{ .product = .{ .coeff = M31.one, .cells = &.{.{ .col = state, .rot = 1 }} } },
+        .{ .product = .{ .coeff = M31.one.neg(), .cells = &.{.{ .col = state, .rot = 0 }} } },
+        .{ .constant = M31.one.neg() },
+    };
+    const constraints = &[_]CS.Constraint{.{ .terms = terms }};
+
+    const evals = try CS.evaluate(constraints, &trace, testing.allocator);
+    defer testing.allocator.free(evals);
+
+    try testing.expect(CS.isSatisfied(evals) == null);
+}
+
+test "evaluate: fibonacci via rotation" {
+    var trace = try CS.Trace.init(testing.allocator, 8);
+    defer trace.deinit();
+
+    const fib = try trace.addColumn();
+
+    // Fill: 1, 1, 2, 3, 5, 8, 13, 21
+    const fibs = [_]u32{ 1, 1, 2, 3, 5, 8, 13, 21 };
+    for (fibs, 0..) |v, i| {
+        try trace.set(fib, i, M31.fromU64(v));
+    }
+
+    // Constraint: fib[row] + fib[row+1] - fib[row+2] = 0
+    const terms = &[_]CS.Term{
+        .{ .product = .{ .coeff = M31.one, .cells = &.{.{ .col = fib, .rot = 0 }} } },
+        .{ .product = .{ .coeff = M31.one, .cells = &.{.{ .col = fib, .rot = 1 }} } },
+        .{ .product = .{ .coeff = M31.one.neg(), .cells = &.{.{ .col = fib, .rot = 2 }} } },
+    };
+    const constraints = &[_]CS.Constraint{.{ .terms = terms }};
+
+    const evals = try CS.evaluate(constraints, &trace, testing.allocator);
+    defer testing.allocator.free(evals);
+
+    try testing.expect(CS.isSatisfied(evals) == null);
+}
+
+test "evaluate: multiple constraints combined" {
+    var trace = try CS.Trace.init(testing.allocator, 4);
+    defer trace.deinit();
+
+    const a = try trace.addColumn();
+    const b = try trace.addColumn();
+    const c = try trace.addColumn();
+    const d = try trace.addColumn();
+
+    // Set up: a + b = c AND a * b = d on all rows
+    // Row 0: a=2, b=3, c=5, d=6
+    try trace.set(a, 0, M31.fromU64(2));
+    try trace.set(b, 0, M31.fromU64(3));
+    try trace.set(c, 0, M31.fromU64(5));
+    try trace.set(d, 0, M31.fromU64(6));
+
+    // Pad remaining rows with zeros (0 + 0 = 0, 0 * 0 = 0)
+    for (1..4) |row| {
+        try trace.set(a, row, M31.zero);
+        try trace.set(b, row, M31.zero);
+        try trace.set(c, row, M31.zero);
+        try trace.set(d, row, M31.zero);
+    }
+
+    // Constraint 1: a + b - c = 0
+    const terms1 = &[_]CS.Term{
+        .{ .product = .{ .coeff = M31.one, .cells = &.{.{ .col = a }} } },
+        .{ .product = .{ .coeff = M31.one, .cells = &.{.{ .col = b }} } },
+        .{ .product = .{ .coeff = M31.one.neg(), .cells = &.{.{ .col = c }} } },
+    };
+
+    // Constraint 2: a * b - d = 0
+    const terms2 = &[_]CS.Term{
+        .{ .product = .{ .coeff = M31.one, .cells = &.{ .{ .col = a }, .{ .col = b } } } },
+        .{ .product = .{ .coeff = M31.one.neg(), .cells = &.{.{ .col = d }} } },
+    };
+
+    const constraints = &[_]CS.Constraint{
+        .{ .terms = terms1 },
+        .{ .terms = terms2 },
+    };
+
+    const evals = try CS.evaluate(constraints, &trace, testing.allocator);
+    defer testing.allocator.free(evals);
+
+    try testing.expect(CS.isSatisfied(evals) == null);
+}
+
+test "evaluateDebug: per-constraint granularity" {
+    var trace = try CS.Trace.init(testing.allocator, 4);
+    defer trace.deinit();
+
+    const a = try trace.addColumn();
+    const b = try trace.addColumn();
+
+    // Row 0: a=1, b=1 (both constraints satisfied)
+    // Row 1: a=2, b=3 (constraint 1 fails: a-b != 0)
+    try trace.set(a, 0, M31.fromU64(1));
+    try trace.set(b, 0, M31.fromU64(1));
+    try trace.set(a, 1, M31.fromU64(2));
+    try trace.set(b, 1, M31.fromU64(3));
+    try trace.set(a, 2, M31.zero);
+    try trace.set(b, 2, M31.zero);
+    try trace.set(a, 3, M31.zero);
+    try trace.set(b, 3, M31.zero);
+
+    // Constraint 1: a - b = 0
+    const terms1 = &[_]CS.Term{
+        .{ .product = .{ .coeff = M31.one, .cells = &.{.{ .col = a }} } },
+        .{ .product = .{ .coeff = M31.one.neg(), .cells = &.{.{ .col = b }} } },
+    };
+
+    // Constraint 2: a * b - a = 0 (satisfied when b=1)
+    const terms2 = &[_]CS.Term{
+        .{ .product = .{ .coeff = M31.one, .cells = &.{ .{ .col = a }, .{ .col = b } } } },
+        .{ .product = .{ .coeff = M31.one.neg(), .cells = &.{.{ .col = a }} } },
+    };
+
+    const constraints = &[_]CS.Constraint{
+        .{ .terms = terms1 },
+        .{ .terms = terms2 },
+    };
+
+    const debug_evals = try CS.evaluateDebug(constraints, &trace, testing.allocator);
+    defer {
+        for (debug_evals) |row| {
+            testing.allocator.free(row);
+        }
+        testing.allocator.free(debug_evals);
+    }
+
+    try testing.expectEqual(@as(usize, 2), debug_evals.len);
+    try testing.expectEqual(@as(usize, 4), debug_evals[0].len);
+
+    // Constraint 1, row 0: 1 - 1 = 0
+    try testing.expect(debug_evals[0][0].isZero());
+    // Constraint 1, row 1: 2 - 3 = -1 (non-zero)
+    try testing.expect(!debug_evals[0][1].isZero());
+
+    // Constraint 2, row 0: 1*1 - 1 = 0
+    try testing.expect(debug_evals[1][0].isZero());
+    // Constraint 2, row 1: 2*3 - 2 = 4 (non-zero)
+    try testing.expect(!debug_evals[1][1].isZero());
+}
+
+test "isSatisfied: returns null for all zeros" {
+    const evals = &[_]M31{ M31.zero, M31.zero, M31.zero, M31.zero };
+    try testing.expect(CS.isSatisfied(evals) == null);
+}
+
+test "isSatisfied: returns first non-zero index" {
+    const evals = &[_]M31{ M31.zero, M31.zero, M31.one, M31.zero };
+    try testing.expectEqual(@as(?usize, 2), CS.isSatisfied(evals));
+}
+
+test "isSatisfied: returns 0 for first element non-zero" {
+    const evals = &[_]M31{ M31.one, M31.zero, M31.zero };
+    try testing.expectEqual(@as(?usize, 0), CS.isSatisfied(evals));
+}
+
+test "isSatisfied: empty slice returns null" {
+    const evals: []const M31 = &.{};
+    try testing.expect(CS.isSatisfied(evals) == null);
 }
