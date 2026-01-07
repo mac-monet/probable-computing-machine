@@ -1,7 +1,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Transcript = @import("transcript.zig").Transcript;
-const tracer_mod = @import("tracer.zig");
+const tracer = @import("tracer.zig");
 
 /// Context options - all comptime for zero-cost when disabled
 pub const Options = struct {
@@ -18,7 +18,7 @@ pub const Options = struct {
 pub fn Span(comptime enabled: bool) type {
     if (enabled) {
         return struct {
-            tracer: *tracer_mod.Tracer,
+            tracer: *tracer.Tracer,
             name: []const u8,
             start: u64,
 
@@ -65,7 +65,7 @@ pub fn ProverContext(comptime F: type, comptime max_vars: usize, comptime opts: 
         transcript: Transcript(F),
 
         /// Tracer for profiling (only exists if opts.tracing == true)
-        tracer: if (opts.tracing) *tracer_mod.Tracer else void,
+        tracer: if (opts.tracing) *tracer.Tracer else void,
 
         // TODO: Add DST fields (conditional on opts):
         // clock: if (opts.simulated_clock) *SimulatedClock else RealClock,
@@ -76,8 +76,8 @@ pub fn ProverContext(comptime F: type, comptime max_vars: usize, comptime opts: 
             return initWithTracer(backing, if (opts.tracing) null else {});
         }
 
-        pub fn initWithTracer(backing: Allocator, tracer: if (opts.tracing) ?*tracer_mod.Tracer else void) !Self {
-            if (opts.tracing and tracer == null) {
+        pub fn initWithTracer(backing: Allocator, trace_ctx: if (opts.tracing) ?*tracer.Tracer else void) !Self {
+            if (opts.tracing and trace_ctx == null) {
                 @panic("Tracing enabled but no tracer provided. Use initWithTracer().");
             }
 
@@ -96,7 +96,7 @@ pub fn ProverContext(comptime F: type, comptime max_vars: usize, comptime opts: 
                 .scratch = scratch,
                 .scratch_aux = scratch_aux,
                 .transcript = Transcript(F).init(""),
-                .tracer = if (opts.tracing) tracer.? else {},
+                .tracer = if (opts.tracing) trace_ctx.? else {},
             };
         }
 
@@ -278,10 +278,10 @@ test "ProverContext span tracing disabled" {
 
 test "ProverContext span tracing enabled" {
     // Tracing enabled - needs tracer instance
-    var tracer = tracer_mod.Tracer.init(std.testing.allocator);
-    defer tracer.deinit();
+    var t = tracer.Tracer.init(std.testing.allocator);
+    defer t.deinit();
 
-    var ctx = try ProverContext(M31, 10, .{ .tracing = true }).initWithTracer(std.testing.allocator, &tracer);
+    var ctx = try ProverContext(M31, 10, .{ .tracing = true }).initWithTracer(std.testing.allocator, &t);
     defer ctx.deinit();
 
     const s = ctx.span("test_span");
@@ -291,6 +291,6 @@ test "ProverContext span tracing enabled" {
     std.mem.doNotOptimizeAway(&x);
     s.end();
 
-    try std.testing.expectEqual(@as(usize, 1), tracer.events.items.len);
-    try std.testing.expectEqualStrings("test_span", tracer.events.items[0].name);
+    try std.testing.expectEqual(@as(usize, 1), t.events.items.len);
+    try std.testing.expectEqualStrings("test_span", t.events.items[0].name);
 }

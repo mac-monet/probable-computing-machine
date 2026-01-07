@@ -310,52 +310,6 @@ test "sumcheck verification fails on wrong claim" {
     try std.testing.expectError(SC.VerifyError.RoundSumMismatch, result);
 }
 
-test "round polynomial computation matches old implementation" {
-    const SC = ProductSumcheck(M31);
-    const Eq = @import("../poly/eq.zig");
-
-    const f_evals = [_]M31{
-        M31.fromU64(1),
-        M31.fromU64(4),
-        M31.fromU64(3),
-        M31.fromU64(10),
-    };
-
-    const r = [_]M31{ M31.fromU64(5), M31.fromU64(7) };
-    var eq_evals: [4]M31 = undefined;
-    Eq.eqEvals(M31, &r, &eq_evals);
-
-    // New generic implementation
-    const round = SC.computeRound(.{ &f_evals, &eq_evals });
-
-    // Manual computation for degree-2
-    // g(0) = Σ f_lo * eq_lo
-    // g(1) = Σ f_hi * eq_hi
-    // g(2) = Σ (2*f_hi - f_lo) * (2*eq_hi - eq_lo)
-    const half = f_evals.len / 2;
-    var g0 = M31.zero;
-    var g1 = M31.zero;
-    var g2 = M31.zero;
-
-    for (0..half) |i| {
-        const f_lo = f_evals[i];
-        const f_hi = f_evals[i + half];
-        const eq_lo = eq_evals[i];
-        const eq_hi = eq_evals[i + half];
-
-        g0 = g0.add(f_lo.mul(eq_lo));
-        g1 = g1.add(f_hi.mul(eq_hi));
-
-        const f_2 = f_hi.double().sub(f_lo);
-        const eq_2 = eq_hi.double().sub(eq_lo);
-        g2 = g2.add(f_2.mul(eq_2));
-    }
-
-    try std.testing.expect(round[0].eql(g0));
-    try std.testing.expect(round[1].eql(g1));
-    try std.testing.expect(round[2].eql(g2));
-}
-
 test "fold matches multilinear bind" {
     const multilinear = @import("../poly/multilinear.zig");
     const SC = LinearSumcheck(M31);

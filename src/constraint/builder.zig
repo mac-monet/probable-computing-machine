@@ -1,12 +1,12 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const constraint_mod = @import("constraint.zig");
-const Cell = constraint_mod.Cell;
+const constraint = @import("constraint.zig");
+const Cell = constraint.Cell;
 
 /// Builder parameterized by field type.
 /// Provides ergonomic API for constructing circuits with common gate patterns.
 pub fn CircuitBuilder(comptime F: type) type {
-    const CS = constraint_mod.ConstraintSystem(F);
+    const CS = constraint.ConstraintSystem(F);
     const Trace = CS.Trace;
     const Term = CS.Term;
     const Constraint = CS.Constraint;
@@ -173,7 +173,7 @@ pub fn CircuitBuilder(comptime F: type) type {
 
 const testing = std.testing;
 const M31 = @import("../fields/mersenne31.zig").Mersenne31;
-const CSTester = constraint_mod.ConstraintSystem(M31);
+const CSTester = constraint.ConstraintSystem(M31);
 const Builder = CircuitBuilder(M31);
 
 test "CircuitBuilder: init and deinit" {
