@@ -99,23 +99,62 @@ Where: f(0, x') = lo[x']
 - Fold operation is simple: `folded[i] = lo[i] + c·(hi[i] - lo[i])`
 - Natural output of NTT and other operations
 
-### AccumulatorTable: Precomputed Sums for Algorithms 4/6
+### AccumulatorTable: Precomputed Sums for Algorithm 4 (No Eq)
+
+For sumchecks WITHOUT eq polynomial (pure small-value optimization):
 
 ```
-Layout: For each round i ∈ [1, ℓ₀], for each u ∈ Û_d:
-        A_i(v, u) for v ∈ [0, (d+1)^{i-1})
+Formula: A_i(v, u) = Σ_{x'∈{0,1}^{ℓ-i}} ∏_{k=1}^d p_k(v, u, x')
 
-        Optimized for inner product: ⟨R_i, A_i(·, u)⟩
+         where v ∈ U_d^{i-1} = {0,1,...,d}^{i-1} indexes Lagrange
+         evaluation points, NOT sum indices.
+
+         The product p_k(v, u, x') evaluates p_k at point
+         (v₁, v₂, ..., v_{i-1}, u, x').
+
+Layout: For each round i ∈ [1, ℓ₀], for each u ∈ Û_d:
+        A_i(v, u) for v ∈ U_d^{i-1}
+
+        Optimized for inner product: t_i(u) = ⟨R_i, A_i(·, u)⟩
 
 Memory: [round_1_data | round_2_data | ... | round_ℓ₀_data]
 
         Where round_i_data = [A_i(·,0) | A_i(·,1) | ... | A_i(·,d-1)]
         And   A_i(·,u) = [A_i(0,u), A_i(1,u), ..., A_i(num_v-1,u)]
+
+Field:  BASE FIELD - all products are ss (small × small)
 ```
 
 **Size**: `Σᵢ (d+1)^{i-1} × d` field elements
 
 For d=2, ℓ₀=5: `(1 + 3 + 9 + 27 + 81) × 2 = 242` elements
+
+### EqAccumulatorTable: Precomputed Sums for Algorithm 6 (With Eq)
+
+For sumchecks WITH eq polynomial (combines SVO with Gruen):
+
+```
+Formula: A_i(v, u) = Σ_{x_R∈{0,1}^{ℓ/2-i}} ẽq(w_R, x_R) ·
+                     Σ_{x_L∈{0,1}^{ℓ/2}} ẽq(w_L, x_L) ·
+                     ∏_{k=1}^d p_k(v, u, x_L, x_R)
+
+         where v ∈ U_d^{i-1} indexes Lagrange evaluation points.
+
+         Note: x_L and x_R lengths are SWAPPED compared to Algorithm 5.
+         This allows reusing inner sums across rounds.
+
+         w_L = w_{[ℓ/2+1, ℓ]}  (second half of verifier challenges)
+         w_R = w_{[i+1, ℓ/2]}  (first half, excluding processed rounds)
+
+Layout: Same as AccumulatorTable
+
+Field:  EXTENSION FIELD - eq terms are in Ext, so weighted sums are too
+
+Mult costs:
+  - ∏_k p_k(v, u, x_L, x_R): ss (base × base)
+  - ẽq(w_L, x_L) · product: sl (ext × base) via mulBase
+  - ẽq(w_R, x_R) · inner_sum: ll (ext × ext)
+```
 
 ### ChallengeTensor: Kronecker Product of Lagrange Bases
 
@@ -131,9 +170,33 @@ Memory: Fixed buffer of size (d+1)^{ℓ₀-1}
         ┌──────────────────────────────────────────┐
         │ R_i elements (len grows each round)  |pad│
         └──────────────────────────────────────────┘
+
+Field:  EXTENSION FIELD - challenges r_j are in Ext
 ```
 
 For d=2, ℓ₀=5: max 81 elements (stack-allocatable)
+
+### LinearFactorState: Gruen Optimization State (Algorithms 5/6)
+
+For eq-weighted sumchecks, we factor: s_i(X) = l_i(X) · t_i(X)
+
+```
+l_i(X) = ẽq(w_{[1,i-1]}, r_{[1,i-1]}) · ẽq(w_i, X)
+       = eq_prefix · ((1 - w_i)(1 - X) + w_i · X)
+
+t_i(X) = "reduced" polynomial without the linear eq factor
+
+State:  eq_prefix: Ext  -- accumulated ẽq(w_{[1,i-1]}, r_{[1,i-1]})
+        w_i: Ext        -- current round's verifier challenge
+
+Field:  EXTENSION FIELD - all verifier challenges w are in Ext
+```
+
+The prover computes t_i(u) for u ∈ Û_d = {0, 2, ..., d}, then recovers:
+```
+t_i(1) = l_i(1)^{-1} · (C_{i-1} - l_i(0) · t_i(0))
+```
+where C_{i-1} is the claimed sum from the previous round.
 
 ### EqTable: Equality Polynomial Evaluations
 
@@ -208,18 +271,29 @@ pub fn s6k(comptime F: type) type {
             // degree of output is degree + 1 due to eq factor
         }
 
-        /// Compute round with split eq (Gruen/Algorithm 5):
-        /// Σ_{x_R} eq_R[x_R] · Σ_{x_L} eq_L[x_L] · ∏ⱼ (loⱼ + t·δⱼ)
+        /// Compute t_i(u) with split eq (Algorithm 5):
+        ///
+        /// t_i(u) = Σ_{x_R∈{0,1}^{ℓ/2}} ẽq(w_R, x_R) ·
+        ///          Σ_{x_L∈{0,1}^{ℓ/2-i}} ẽq(w_L, x_L) ·
+        ///          ∏_k (P_k[0,x_L,x_R] + u·(P_k[1,x_L,x_R] - P_k[0,x_L,x_R]))
+        ///
+        /// Returns t_i(u) for u ∈ Û_d = {0, 2, ..., d}.
+        /// Does NOT return t_i(1) - use recoverT1() to get it.
+        /// Does NOT return s_i - use applyLinearFactor() to convert.
+        ///
+        /// Note: This computes t_i, NOT s_i directly!
         pub fn computeRoundSplitEq(
             comptime degree: comptime_int,
-            buffer: [*]const F,
-            len: usize,
-            eq_L: [*]const F,
-            eq_L_len: usize,
-            eq_R: [*]const F,
-            eq_R_len: usize,
-        ) Coeffs(degree) {
-            // Two-level summation for cache efficiency
+            buffer: [*]const F,      // Polynomial evaluations
+            len: usize,              // Current polynomial length (2^{ℓ-i+1})
+            eq_L: [*]const F,        // ẽq(w_L, ·) for x_L ∈ {0,1}^{ℓ/2-i}
+            eq_L_len: usize,         // 2^{ℓ/2-i}
+            eq_R: [*]const F,        // ẽq(w_R, ·) for x_R ∈ {0,1}^{ℓ/2}
+            eq_R_len: usize,         // 2^{ℓ/2}
+        ) [degree]F {                // Note: returns d values, not d+1
+            // Two-level summation for cache efficiency:
+            // Outer loop: x_R (strided access)
+            // Inner loop: x_L (contiguous access)
         }
 
         // ══════════════════════════════════════════════════════════
@@ -317,40 +391,122 @@ pub fn s6k(comptime F: type) type {
         }
 
         // ══════════════════════════════════════════════════════════
-        // Accumulator Operations (Algorithms 4/6)
+        // Accumulator Operations - Algorithm 4 (No Eq)
         // ══════════════════════════════════════════════════════════
 
-        /// Precompute accumulator table for small-value optimization
+        /// Precompute accumulator table for small-value optimization (Algorithm 4)
         ///
-        /// A_i(v, u) = Σ_{x'} [Σ_{y': Σy'_k = v} ∏_k p_k(y'_k, u, x')]
+        /// A_i(v, u) = Σ_{x'∈{0,1}^{ℓ-i}} ∏_{k=1}^d p_k(v, u, x')
+        ///
+        /// where v ∈ U_d^{i-1} indexes Lagrange evaluation points.
+        ///
+        /// All multiplications are ss (base × base).
+        /// Output is in BASE field.
         ///
         /// Output layout: see AccumulatorTable documentation
         pub fn precomputeAccumulators(
             comptime degree: comptime_int,
-            buffer: [*]const F,
-            len: usize,
-            num_rounds: usize,
-            out: [*]F,
-            out_offsets: [*]usize,  // Filled with round offsets
+            buffer: [*]const F,       // Original polynomial evals
+            len: usize,               // 2^ℓ
+            num_rounds: usize,        // ℓ₀
+            out: [*]F,                // Output accumulator table
+            out_offsets: [*]usize,    // Filled with round offsets
         ) void {
-            // See Algorithm 4 in literature
+            // For each x' ∈ {0,1}^{ℓ-ℓ₀}:
+            //   For each v ∈ U_d^{ℓ₀-1}:
+            //     For each u ∈ Û_d:
+            //       product = ∏_k p_k(v, u, x')   // ss mults
+            //       A_i(v_prefix, u) += product   // for appropriate round i
         }
 
-        /// Compute round polynomial from precomputed accumulators
-        /// round(u) = ⟨R_i, A_i(·, u)⟩
-        pub fn computeRoundFromAccumulators(
+        // ══════════════════════════════════════════════════════════
+        // Accumulator Operations - Algorithm 6 (With Eq)
+        // ══════════════════════════════════════════════════════════
+
+        /// Precompute eq-weighted accumulator table (Algorithm 6)
+        ///
+        /// A_i(v, u) = Σ_{x_R} ẽq(w_R, x_R) · Σ_{x_L} ẽq(w_L, x_L) · ∏_k p_k(v, u, x_L, x_R)
+        ///
+        /// where v ∈ U_d^{i-1} indexes Lagrange evaluation points.
+        ///
+        /// Multiplication costs:
+        ///   - ∏_k p_k(...): ss (base × base)
+        ///   - ẽq(w_L, x_L) · product: sl via Ext.mulBase
+        ///   - ẽq(w_R, x_R) · inner_sum: ll (ext × ext)
+        ///
+        /// Output is in EXTENSION field.
+        pub fn precomputeEqAccumulators(
+            comptime ExtF: type,
             comptime degree: comptime_int,
-            challenge_tensor: [*]const F,
+            buffer: [*]const F,       // Original polynomial evals (base field)
+            len: usize,
+            num_rounds: usize,        // ℓ₀
+            eq_L: [*]const ExtF,      // ẽq(w_L, ·), length 2^{ℓ/2}
+            eq_L_len: usize,
+            eq_R: [*]const ExtF,      // ẽq(w_R, ·), length 2^{ℓ/2}
+            eq_R_len: usize,
+            out: [*]ExtF,             // Output in extension field
+            out_offsets: [*]usize,
+        ) void {
+            // Two-level summation with eq weighting
+            // Inner sum over x_L is reused across rounds
+        }
+
+        // ══════════════════════════════════════════════════════════
+        // Round from Accumulators
+        // ══════════════════════════════════════════════════════════
+
+        /// Compute t_i(u) from base field accumulators (Algorithm 4)
+        /// t_i(u) = ⟨R_i, A_i(·, u)⟩
+        ///
+        /// This is a MIXED dot product: Ext · Base → Ext
+        /// Uses sl multiplications via ExtF.mulBase
+        ///
+        /// Returns t_i(u) for u ∈ Û_d. Does NOT include t_i(1).
+        /// Caller must use recoverT1() for eq-weighted sumchecks.
+        pub fn computeRoundFromAccumulators(
+            comptime ExtF: type,
+            comptime degree: comptime_int,
+            challenge_tensor: [*]const ExtF,  // R_i, length (d+1)^{i-1}
             tensor_len: usize,
-            accumulators: [*]const F,  // A_i(·, u) for all u
-            num_v: usize,              // (d+1)^{i-1}
-        ) Coeffs(degree) {
-            var coeffs: Coeffs(degree) = undefined;
+            accumulators: [*]const F,         // A_i(·, u) in BASE field
+            num_v: usize,                     // (d+1)^{i-1}
+        ) [degree]ExtF {
+            var coeffs: [degree]ExtF = undefined;
             inline for (0..degree) |u| {
                 const accum_u = accumulators[u * num_v ..][0..num_v];
-                coeffs[u] = dotProduct(challenge_tensor[0..tensor_len], accum_u);
+                // Mixed dot product: Σ_v R_i[v] * A_i(v, u)
+                // Each term is sl: ExtF.mulBase(tensor[v], accum_u[v])
+                var sum = ExtF.zero;
+                for (0..tensor_len) |v| {
+                    sum = sum.add(challenge_tensor[v].mulBase(accum_u[v]));
+                }
+                coeffs[u] = sum;
             }
-            // Derive coeffs[degree] from sum property if needed
+            return coeffs;
+        }
+
+        /// Compute t_i(u) from extension field accumulators (Algorithm 6)
+        /// t_i(u) = ⟨R_i, A_i(·, u)⟩
+        ///
+        /// This is Ext · Ext → Ext (ll multiplications)
+        /// because eq-weighted accumulators are already in Ext.
+        pub fn computeRoundFromEqAccumulators(
+            comptime degree: comptime_int,
+            challenge_tensor: [*]const F,     // R_i in Ext
+            tensor_len: usize,
+            accumulators: [*]const F,         // A_i(·, u) in Ext
+            num_v: usize,
+        ) [degree]F {
+            var coeffs: [degree]F = undefined;
+            inline for (0..degree) |u| {
+                const accum_u = accumulators[u * num_v ..][0..num_v];
+                // Ext · Ext dot product (ll)
+                coeffs[u] = F.dotProduct(
+                    challenge_tensor[0..tensor_len],
+                    accum_u,
+                );
+            }
             return coeffs;
         }
 
@@ -388,6 +544,112 @@ pub fn s6k(comptime F: type) type {
                 }
             }
             return new_len;
+        }
+
+        // ══════════════════════════════════════════════════════════
+        // Gruen Linear Factor Recovery (Algorithms 5/6)
+        // ══════════════════════════════════════════════════════════
+
+        /// Linear factor state for eq-weighted sumchecks.
+        /// Tracks: s_i(X) = l_i(X) · t_i(X)
+        ///
+        /// All values are in EXTENSION field.
+        pub const LinearFactorState = struct {
+            /// ẽq(w_{[1,i-1]}, r_{[1,i-1]}) - accumulated product
+            eq_prefix: F,
+
+            /// Current round's verifier challenge w_i
+            w_i: F,
+
+            pub fn init(w_1: F) LinearFactorState {
+                return .{ .eq_prefix = F.one, .w_i = w_1 };
+            }
+
+            /// Compute l_i(X) = eq_prefix · ẽq(w_i, X)
+            /// Returns [l_i(0), l_i(1)]
+            pub fn linearFactor(self: LinearFactorState) [2]F {
+                // ẽq(w_i, 0) = 1 - w_i
+                // ẽq(w_i, 1) = w_i
+                return .{
+                    self.eq_prefix.mul(F.one.sub(self.w_i)),  // l_i(0)
+                    self.eq_prefix.mul(self.w_i),              // l_i(1)
+                };
+            }
+
+            /// Update state after round i with challenge r_i
+            pub fn update(self: *LinearFactorState, next_w: F, r_i: F) void {
+                // eq_prefix *= ẽq(w_i, r_i) = (1-w_i)(1-r_i) + w_i·r_i
+                const one_minus_w = F.one.sub(self.w_i);
+                const one_minus_r = F.one.sub(r_i);
+                const eq_eval = one_minus_w.mul(one_minus_r).add(self.w_i.mul(r_i));
+                self.eq_prefix = self.eq_prefix.mul(eq_eval);
+                self.w_i = next_w;
+            }
+        };
+
+        /// Recover t_i(1) from the sum property.
+        ///
+        /// Given: t_i(u) for u ∈ Û_d = {0, 2, 3, ..., d}
+        /// Need:  t_i(1)
+        ///
+        /// Using: s_i(0) + s_i(1) = C_{i-1}
+        ///        l_i(0)·t_i(0) + l_i(1)·t_i(1) = C_{i-1}
+        ///
+        /// Therefore: t_i(1) = l_i(1)^{-1} · (C_{i-1} - l_i(0)·t_i(0))
+        pub fn recoverT1(
+            t_at_0: F,
+            linear_factor: [2]F,  // [l_i(0), l_i(1)]
+            claimed_sum: F,       // C_{i-1}
+        ) F {
+            const l0 = linear_factor[0];
+            const l1 = linear_factor[1];
+            return claimed_sum.sub(l0.mul(t_at_0)).mul(l1.inv());
+        }
+
+        /// Convert t_i coefficients to s_i coefficients.
+        /// s_i(X) = l_i(X) · t_i(X)
+        ///        = (l0 + (l1-l0)·X) · (t0 + t1·X + t2·X² + ...)
+        ///
+        /// Output degree is input degree + 1.
+        pub fn applyLinearFactor(
+            comptime degree: comptime_int,
+            t_coeffs: [degree + 1]F,
+            linear_factor: [2]F,
+        ) [degree + 2]F {
+            const l0 = linear_factor[0];
+            const l1_minus_l0 = linear_factor[1].sub(linear_factor[0]);
+
+            var s_coeffs: [degree + 2]F = undefined;
+            // s_k = l0·t_k + (l1-l0)·t_{k-1}
+            s_coeffs[0] = l0.mul(t_coeffs[0]);
+            inline for (1..degree + 1) |k| {
+                s_coeffs[k] = l0.mul(t_coeffs[k]).add(l1_minus_l0.mul(t_coeffs[k - 1]));
+            }
+            s_coeffs[degree + 1] = l1_minus_l0.mul(t_coeffs[degree]);
+            return s_coeffs;
+        }
+
+        /// Build full t_i coefficients from partial evaluations.
+        ///
+        /// Input: t_i(u) for u ∈ Û_d = {0, 2, 3, ..., d} (d values)
+        /// Plus:  t_i(1) from recoverT1()
+        ///
+        /// Output: coefficients [t_0, t_1, ..., t_d] via interpolation
+        pub fn interpolateT(
+            comptime degree: comptime_int,
+            t_evals: [degree]F,    // t_i(0), t_i(2), t_i(3), ..., t_i(d)
+            t_at_1: F,             // t_i(1) from recovery
+        ) [degree + 1]F {
+            // Lagrange interpolation over U_d = {0, 1, 2, ..., d}
+            // Reorder evaluations: [t(0), t(1), t(2), ..., t(d)]
+            var evals: [degree + 1]F = undefined;
+            evals[0] = t_evals[0];
+            evals[1] = t_at_1;
+            inline for (2..degree + 1) |k| {
+                evals[k] = t_evals[k - 1];
+            }
+            // Now interpolate to get coefficients
+            // ... (standard Lagrange interpolation)
         }
 
         // ══════════════════════════════════════════════════════════
@@ -459,7 +721,8 @@ pub fn s6k(comptime F: type) type {
 
 ### Strategy: Type Bundle (No Methods)
 
-Strategy provides type aliases for a specific sumcheck configuration:
+Strategy bundles types for a specific sumcheck configuration.
+Clarifies which field is used where.
 
 ```zig
 pub fn Strategy(
@@ -468,6 +731,15 @@ pub fn Strategy(
     comptime degree: comptime_int,
     comptime num_polys: comptime_int,
 ) type {
+    comptime {
+        // Verify ExtF is an extension of BaseF
+        if (@hasDecl(ExtF, "BaseField")) {
+            if (ExtF.BaseField != BaseF) {
+                @compileError("ExtF.BaseField must equal BaseF");
+            }
+        }
+    }
+
     return struct {
         // Field types
         pub const Base = BaseF;
@@ -477,13 +749,18 @@ pub fn Strategy(
         pub const Degree = degree;
         pub const NumPolys = num_polys;
 
-        // s6k instantiations
-        pub const BaseS6k = s6k(BaseF);
-        pub const ExtS6k = s6k(ExtF);
+        // s6k instantiations for each field
+        pub const BaseOps = s6k(BaseF);
+        pub const ExtOps = s6k(ExtF);
 
-        // Coefficient types
-        pub const BaseCoeffs = BaseS6k.Coeffs(degree);
-        pub const ExtCoeffs = ExtS6k.Coeffs(degree);
+        // Coefficient types (degree+1 for standard, degree+2 after Gruen)
+        pub const BaseCoeffs = [degree + 1]BaseF;
+        pub const ExtCoeffs = [degree + 1]ExtF;
+        pub const FullCoeffs = [degree + 2]ExtF;  // After Gruen linear factor
+
+        // Accumulator types
+        pub const Accumulators = BaseOps.AccumulatorTable;      // Alg 4: Base field
+        pub const EqAccumulators = ExtOps.EqAccumulatorTable;   // Alg 6: Ext field
 
         // Buffer sizes
         pub fn polyBufferSize(len: usize) usize {
@@ -493,6 +770,13 @@ pub fn Strategy(
         pub fn extBufferSize(base_len: usize) usize {
             return num_polys * (base_len / 2);
         }
+
+        /// Cost model for algorithm selection
+        pub const Cost = struct {
+            ss: usize,  // Base × Base
+            sl: usize,  // Ext × Base (via mulBase)
+            ll: usize,  // Ext × Ext
+        };
     };
 }
 ```
@@ -590,40 +874,56 @@ const S = Strategy(M31, M31Ext3, 2, 2);
 const L0 = 5;  // Rounds using SVO before switching to standard
 
 pub const ZerocheckProver = struct {
-    // Polynomial buffer
+    // Polynomial buffer (base field initially)
     poly_buffer: []S.Base,
     ext_buffer: []S.Ext,
     len: usize,
 
-    // Accumulator table (precomputed)
+    // Eq-weighted accumulator table (EXTENSION field for Alg 6)
     accum_table: []S.Ext,
     accum_offsets: [L0 + 1]usize,
 
-    // Challenge tensor (stack allocated)
+    // Challenge tensor R_i (extension field)
     challenge_tensor: ChallengeTensor(S.Ext, S.Degree, L0),
 
-    // Split eq tables
+    // Split eq tables (extension field)
     eq_L: []S.Ext,
     eq_R: []S.Ext,
+    eq_L_len: usize,
+    eq_R_len: usize,
+
+    // Verifier challenges w (extension field)
+    w: []S.Ext,
+
+    // Gruen linear factor state
+    linear_state: S.ExtOps.LinearFactorState,
+
+    // Current claimed sum
+    claimed_sum: S.Ext,
 
     transcript: *Transcript,
 
     pub fn prove(self: *ZerocheckProver) !Proof {
         const num_vars = std.math.log2(self.len);
 
-        // Phase 0: Precompute accumulators
-        S.BaseS6k.precomputeAccumulators(
+        // Phase 0: Precompute eq-weighted accumulators (Algorithm 6)
+        // Note: Using precomputeEqAccumulators, not precomputeAccumulators
+        S.BaseOps.precomputeEqAccumulators(
+            S.Ext,
             S.Degree,
             self.poly_buffer.ptr,
             self.len,
             L0,
+            self.eq_L.ptr,
+            self.eq_L_len,
+            self.eq_R.ptr,
+            self.eq_R_len,
             self.accum_table.ptr,
             &self.accum_offsets,
         );
 
-        // Build eq tables
-        S.ExtS6k.buildEqTable(self.w_L.ptr, num_vars / 2, self.eq_L.ptr);
-        S.ExtS6k.buildEqTable(self.w_R.ptr, num_vars / 2, self.eq_R.ptr);
+        // Initialize Gruen linear factor state
+        self.linear_state = S.ExtOps.LinearFactorState.init(self.w[0]);
 
         // Phase 1: Accumulator-based rounds (1..L0)
         self.challenge_tensor.init();
@@ -632,8 +932,8 @@ pub const ZerocheckProver = struct {
             const accum_offset = self.accum_offsets[round];
             const num_v = std.math.pow(usize, S.Degree + 1, round - 1);
 
-            // s6k: compute from accumulators
-            const t_coeffs = S.ExtS6k.computeRoundFromAccumulators(
+            // s6k: compute t_i(u) from eq-weighted accumulators (ll dot product)
+            const t_partial = S.ExtOps.computeRoundFromEqAccumulators(
                 S.Degree,
                 self.challenge_tensor.ptr(),
                 self.challenge_tensor.len,
@@ -641,16 +941,31 @@ pub const ZerocheckProver = struct {
                 num_v,
             );
 
-            // Gruen: reconstruct s_i from t_i and linear factor
-            const coeffs = self.reconstructWithLinearFactor(t_coeffs, round);
+            // Gruen: recover t_i(1) from sum property
+            const linear_factor = self.linear_state.linearFactor();
+            const t_at_1 = S.ExtOps.recoverT1(t_partial[0], linear_factor, self.claimed_sum);
+
+            // Build full t_i coefficients via interpolation
+            const t_coeffs = S.ExtOps.interpolateT(S.Degree, t_partial, t_at_1);
+
+            // Convert t_i to s_i: s_i(X) = l_i(X) · t_i(X)
+            const s_coeffs = S.ExtOps.applyLinearFactor(S.Degree, t_coeffs, linear_factor);
 
             // Transcript
-            self.transcript.absorbCoeffs(S.Ext, &coeffs);
+            self.transcript.absorbCoeffs(S.Ext, &s_coeffs);
             const challenge = self.transcript.squeeze(S.Ext);
 
-            // Extend tensor
-            const basis = S.ExtS6k.lagrangeBasis(S.Degree, challenge);
-            self.challenge_tensor.len = S.ExtS6k.extendTensor(
+            // Update claimed sum: C_i = s_i(r_i)
+            self.claimed_sum = S.ExtOps.evalAt(S.Degree + 1, s_coeffs, challenge);
+
+            // Update linear factor state for next round
+            if (round < num_vars) {
+                self.linear_state.update(self.w[round], challenge);
+            }
+
+            // Extend tensor: R_{i+1} = R_i ⊗ (L_k(r_i))_k
+            const basis = S.ExtOps.lagrangeBasis(S.Degree, challenge);
+            self.challenge_tensor.len = S.ExtOps.extendTensor(
                 S.Degree,
                 self.challenge_tensor.ptr(),
                 self.challenge_tensor.len,
@@ -659,13 +974,13 @@ pub const ZerocheckProver = struct {
             );
         }
 
-        // Phase 2: Materialize folded state from accumulators
-        self.materializeFromAccumulators();
+        // Phase 2: Materialize folded state from tensor
+        self.materializeFromTensor();
 
         // Phase 3: Standard rounds with split eq (L0+1..num_vars)
         for (L0 + 1..num_vars) |round| {
-            // s6k: compute with split eq
-            const t_coeffs = S.ExtS6k.computeRoundSplitEq(
+            // s6k: compute t_i with split eq (returns d values, not d+1)
+            const t_partial = S.ExtOps.computeRoundSplitEq(
                 S.Degree,
                 self.ext_buffer.ptr,
                 self.len,
@@ -675,21 +990,33 @@ pub const ZerocheckProver = struct {
                 self.eq_R_len,
             );
 
-            const coeffs = self.reconstructWithLinearFactor(t_coeffs, round);
+            // Gruen: recover t_i(1) and convert to s_i
+            const linear_factor = self.linear_state.linearFactor();
+            const t_at_1 = S.ExtOps.recoverT1(t_partial[0], linear_factor, self.claimed_sum);
+            const t_coeffs = S.ExtOps.interpolateT(S.Degree, t_partial, t_at_1);
+            const s_coeffs = S.ExtOps.applyLinearFactor(S.Degree, t_coeffs, linear_factor);
 
-            self.transcript.absorbCoeffs(S.Ext, &coeffs);
+            self.transcript.absorbCoeffs(S.Ext, &s_coeffs);
             const challenge = self.transcript.squeeze(S.Ext);
 
-            // s6k: fold
-            self.len = S.ExtS6k.foldInPlace(
+            self.claimed_sum = S.ExtOps.evalAt(S.Degree + 1, s_coeffs, challenge);
+
+            if (round < num_vars) {
+                self.linear_state.update(self.w[round], challenge);
+            }
+
+            // s6k: fold polynomials
+            self.len = S.ExtOps.foldInPlace(
                 S.NumPolys,
                 self.ext_buffer.ptr,
                 self.len,
                 challenge,
             );
 
-            // s6k: fold eq tables
-            self.eq_L_len = S.ExtS6k.foldEqTable(self.eq_L.ptr, self.eq_L_len, challenge);
+            // s6k: fold eq_L table (eq_R stays fixed after L0)
+            if (round < num_vars / 2) {
+                self.eq_L_len = S.ExtOps.foldEqTable(self.eq_L.ptr, self.eq_L_len, challenge);
+            }
         }
 
         return self.buildProof();
@@ -719,14 +1046,16 @@ fn ChallengeTensor(comptime F: type, comptime degree: comptime_int, comptime max
 
 ## Algorithm Support Matrix
 
-| Algorithm | Use Case | s6k Primitives Used |
-|-----------|----------|---------------------|
-| **Alg 1** | Standard, memory available | `computeRound`, `foldInPlace` |
-| **Alg 2** | Memory-constrained | `computeRound`, `buildEqTable`, delayed fold |
-| **Alg 3** | Small values, fewer ll mults | `precomputeAccumulators` (eq-based) |
-| **Alg 4** | Small values, Toom-Cook | `precomputeAccumulators`, `lagrangeBasis` |
-| **Alg 5** | With eq poly (Gruen) | `computeRoundSplitEq`, split eq tables |
-| **Alg 6** | Alg 4 + Alg 5 combined | All accumulator + split eq primitives |
+| Algorithm | Use Case | s6k Primitives Used | Accum Field |
+|-----------|----------|---------------------|-------------|
+| **Alg 1** | Standard, memory available | `computeRound`, `foldInPlace`, `foldToExt` | N/A |
+| **Alg 2** | Memory-constrained | `computeRoundWithEq`, `buildEqTable`, delayed fold | N/A |
+| **Alg 3** | (Superseded by Alg 4) | Not implemented | - |
+| **Alg 4** | Small values, Toom-Cook (no eq) | `precomputeAccumulators`, `computeRoundFromAccumulators`, `lagrangeBasis`, `extendTensor` | **Base** |
+| **Alg 5** | With eq poly (Gruen) | `computeRoundSplitEq`, `recoverT1`, `applyLinearFactor`, `LinearFactorState` | N/A |
+| **Alg 6** | Alg 4 + Alg 5 combined | `precomputeEqAccumulators`, `computeRoundFromEqAccumulators`, + all Gruen primitives | **Ext** |
+
+**Key insight**: Algorithm 4 accumulators are in BASE field (ss products), Algorithm 6 accumulators are in EXTENSION field (eq-weighted).
 
 ### Choosing an Algorithm
 
@@ -926,8 +1255,10 @@ src/
 │   ├── round.zig          # computeRound implementations
 │   ├── fold.zig           # fold operations
 │   ├── eq.zig             # eq table operations
-│   ├── accumulator.zig    # accumulator operations (Alg 4/6)
+│   ├── accumulator.zig    # Algorithm 4 accumulators (Base field)
+│   ├── eq_accumulator.zig # Algorithm 6 accumulators (Ext field)
 │   ├── tensor.zig         # Lagrange/tensor operations
+│   ├── gruen.zig          # LinearFactorState, recoverT1, applyLinearFactor
 │   ├── verify.zig         # checkSum, evalAt
 │   ├── simd/
 │   │   ├── avx2.zig
@@ -940,8 +1271,8 @@ src/
 │   ├── executor.zig
 │   └── graph.zig
 └── protocols/
-    ├── basefold.zig       # Uses s6k
-    ├── zerocheck.zig      # Uses s6k
+    ├── basefold.zig       # Uses s6k (Alg 1)
+    ├── zerocheck.zig      # Uses s6k (Alg 5/6)
     └── gkr.zig            # Uses s6k
 ```
 
@@ -957,7 +1288,17 @@ src/
 
 ## Appendix: Field Operation Costs
 
-Understanding multiplication costs drives algorithm selection:
+Understanding multiplication costs drives algorithm selection.
+
+### Field Interface Mapping (src/fields/field.zig)
+
+| Cost Type | Symbol | Field Interface | Example |
+|-----------|--------|-----------------|---------|
+| ss | Base × Base | `Base.mul(Base, Base)` | M31 × M31 |
+| sl | Ext × Base | `Ext.mulBase(Ext, Base)` | M31Ext3 × M31 |
+| ll | Ext × Ext | `Ext.mul(Ext, Ext)` | M31Ext3 × M31Ext3 |
+
+### Relative Costs
 
 | Operation | Symbol | Example | Relative Cost |
 |-----------|--------|---------|---------------|
@@ -965,7 +1306,16 @@ Understanding multiplication costs drives algorithm selection:
 | Base × Ext | sl | M31 × M31Ext3 | ~3× |
 | Ext × Ext | ll | M31Ext3 × M31Ext3 | ~9× |
 
+### Batch Operations
+
+| Operation | Field Interface | Use Case |
+|-----------|-----------------|----------|
+| Base dot product | `Base.dotProduct([]Base, []Base)` | Accumulator sums (ss) |
+| Mixed dot product | `Ext.Batch.dotProductMixed([]Base)` | Tensor × accumulators (sl) |
+| Ext dot product | `Ext.dotProduct([]Ext, []Ext)` | Eq-weighted accumulators (ll) |
+
 Algorithms 3-6 optimize by:
 1. Keeping data in base field longer (fewer ll)
 2. Precomputing expensive products (amortize ll)
 3. Using structure (eq factorization) to reduce degree
+4. Using `mulBase` for sl operations instead of full ll multiply

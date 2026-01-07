@@ -77,6 +77,283 @@ pub fn defaults(comptime Self: type) type {
     };
 }
 
+// ============ Extension Field Interface ============ //
+
+/// Extension field interface and generic constructor.
+pub const ExtField = struct {
+    /// Verify that a type implements the extension field interface.
+    /// Use: `comptime { ExtField.verify(MyExt); }` at end of implementation.
+    pub fn verify(comptime E: type) void {
+        // Must have base field reference and degree
+        _ = E.BaseField;
+        _ = E.DEGREE;
+
+        // Extension-specific operations
+        _ = @as(fn (E.BaseField) E, E.fromBase);
+        _ = @as(fn (E, E.BaseField) E, E.mulBase);
+
+        // Standard field operations
+        _ = E.zero;
+        _ = E.one;
+        _ = @as(fn (E, E) E, E.add);
+        _ = @as(fn (E, E) E, E.sub);
+        _ = @as(fn (E, E) E, E.mul);
+        _ = @as(fn (E) E, E.neg);
+        _ = @as(fn (E, E) bool, E.eql);
+        _ = @as(fn (E) bool, E.isZero);
+    }
+
+    /// Construct an extension field from a configuration type.
+    ///
+    /// Config must provide:
+    /// - `Base`: the base field type
+    /// - `degree`: extension degree (comptime_int)
+    /// - `reduce(*const [2*degree-1]Base) [degree]Base`: reduction mod irreducible
+    pub fn init(comptime Config: type) type {
+        const Base = Config.Base;
+        const degree = Config.degree;
+
+        return struct {
+            const Self = @This();
+
+            coeffs: [degree]Base,
+
+            pub const BaseField = Base;
+            pub const DEGREE = degree;
+
+            pub const zero: Self = .{ .coeffs = [_]Base{Base.zero} ** degree };
+            pub const one: Self = blk: {
+                var c = [_]Base{Base.zero} ** degree;
+                c[0] = Base.one;
+                break :blk .{ .coeffs = c };
+            };
+
+            /// Embed base field element: a -> (a, 0, 0, ...)
+            pub fn fromBase(a: Base) Self {
+                var c = [_]Base{Base.zero} ** degree;
+                c[0] = a;
+                return .{ .coeffs = c };
+            }
+
+            /// Multiply extension element by base field element.
+            /// O(degree) base field multiplications.
+            pub fn mulBase(self: Self, b: Base) Self {
+                var result: [degree]Base = undefined;
+                inline for (0..degree) |i| {
+                    result[i] = self.coeffs[i].mul(b);
+                }
+                return .{ .coeffs = result };
+            }
+
+            pub fn add(a: Self, b: Self) Self {
+                var result: [degree]Base = undefined;
+                inline for (0..degree) |i| {
+                    result[i] = a.coeffs[i].add(b.coeffs[i]);
+                }
+                return .{ .coeffs = result };
+            }
+
+            pub fn sub(a: Self, b: Self) Self {
+                var result: [degree]Base = undefined;
+                inline for (0..degree) |i| {
+                    result[i] = a.coeffs[i].sub(b.coeffs[i]);
+                }
+                return .{ .coeffs = result };
+            }
+
+            /// Polynomial multiplication with reduction.
+            /// O(degree²) base field multiplications.
+            pub fn mul(a: Self, b: Self) Self {
+                // Schoolbook polynomial multiplication
+                var product: [2 * degree - 1]Base = [_]Base{Base.zero} ** (2 * degree - 1);
+
+                inline for (0..degree) |i| {
+                    inline for (0..degree) |j| {
+                        product[i + j] = product[i + j].add(a.coeffs[i].mul(b.coeffs[j]));
+                    }
+                }
+
+                // Reduce mod irreducible polynomial
+                return .{ .coeffs = Config.reduce(&product) };
+            }
+
+            pub fn neg(a: Self) Self {
+                var result: [degree]Base = undefined;
+                inline for (0..degree) |i| {
+                    result[i] = a.coeffs[i].neg();
+                }
+                return .{ .coeffs = result };
+            }
+
+            pub fn eql(a: Self, b: Self) bool {
+                inline for (0..degree) |i| {
+                    if (!a.coeffs[i].eql(b.coeffs[i])) return false;
+                }
+                return true;
+            }
+
+            pub fn isZero(a: Self) bool {
+                inline for (0..degree) |i| {
+                    if (!a.coeffs[i].isZero()) return false;
+                }
+                return true;
+            }
+
+            pub fn square(a: Self) Self {
+                return a.mul(a);
+            }
+
+            /// Multiplicative inverse using norm-based approach.
+            /// For degree-2: a^(-1) = conjugate(a) / norm(a)
+            pub fn inv(a: Self) Self {
+                std.debug.assert(!a.isZero());
+                if (degree == 2) {
+                    // For x^2 = W: (c0 + c1*x)^(-1) = (c0 - c1*x) / (c0^2 - W*c1^2)
+                    const c0 = a.coeffs[0];
+                    const c1 = a.coeffs[1];
+                    const w = Base.fromU64(Config.W);
+                    const norm = c0.mul(c0).sub(w.mul(c1.mul(c1)));
+                    const norm_inv = norm.inv();
+                    return .{ .coeffs = .{
+                        c0.mul(norm_inv),
+                        c1.neg().mul(norm_inv),
+                    } };
+                } else {
+                    // General case: use Fermat's little theorem
+                    // a^(-1) = a^(p^degree - 2) - expensive but correct
+                    @compileError("inv() for degree > 2 not yet implemented");
+                }
+            }
+
+            /// Random sampling from the extension field.
+            pub fn random(rng: std.Random) Self {
+                var result: [degree]Base = undefined;
+                inline for (0..degree) |i| {
+                    result[i] = Base.random(rng);
+                }
+                return .{ .coeffs = result };
+            }
+
+            /// SoA (Struct of Arrays) layout for SIMD-friendly batch operations.
+            /// Each coefficient stream is stored separately for cache efficiency.
+            pub const Batch = struct {
+                /// coeffs[i] contains all i-th coefficients across elements.
+                /// Length of each slice is the batch size.
+                coeffs: [degree][]Base,
+
+                /// Transpose from AoS ([]Ext) to SoA (Batch).
+                /// Caller provides storage for coefficient slices.
+                pub fn fromSlice(exts: []const Self, storage: *[degree][]Base) Batch {
+                    const len = exts.len;
+                    inline for (0..degree) |d| {
+                        for (0..len) |i| {
+                            storage[d][i] = exts[i].coeffs[d];
+                        }
+                    }
+                    return .{ .coeffs = storage.* };
+                }
+
+                /// Dot product with base field using SIMD-friendly layout.
+                /// Reuses Base.dotProduct for each coefficient stream.
+                pub fn dotProductMixed(self: Batch, bases: []const Base) Self {
+                    std.debug.assert(self.coeffs[0].len == bases.len);
+                    var result: [degree]Base = undefined;
+                    inline for (0..degree) |d| {
+                        result[d] = Base.dotProduct(bases, self.coeffs[d]);
+                    }
+                    return .{ .coeffs = result };
+                }
+            };
+        };
+    }
+
+    /// Default implementations for extension field derived operations.
+    pub fn defaults(comptime Self: type) type {
+        return struct {
+            pub fn square(a: Self) Self {
+                return a.mul(a);
+            }
+
+            pub fn double(a: Self) Self {
+                return a.add(a);
+            }
+        };
+    }
+
+    /// Generic extension field tests.
+    pub fn tests(comptime E: type) type {
+        return struct {
+            test "extension: additive identity" {
+                const a = E.fromBase(E.BaseField.fromU64(12345));
+                try testing.expect(a.add(E.zero).eql(a));
+                try testing.expect(E.zero.add(a).eql(a));
+            }
+
+            test "extension: multiplicative identity" {
+                const a = E.fromBase(E.BaseField.fromU64(12345));
+                try testing.expect(a.mul(E.one).eql(a));
+                try testing.expect(E.one.mul(a).eql(a));
+            }
+
+            test "extension: additive inverse" {
+                const a = E.fromBase(E.BaseField.fromU64(12345));
+                try testing.expect(a.add(a.neg()).isZero());
+            }
+
+            test "extension: multiplicative inverse" {
+                const a = E.fromBase(E.BaseField.fromU64(12345));
+                try testing.expect(a.mul(a.inv()).eql(E.one));
+            }
+
+            test "extension: commutativity" {
+                const a = E.fromBase(E.BaseField.fromU64(111));
+                const b = E.fromBase(E.BaseField.fromU64(222));
+                try testing.expect(a.add(b).eql(b.add(a)));
+                try testing.expect(a.mul(b).eql(b.mul(a)));
+            }
+
+            test "extension: associativity" {
+                const a = E.fromBase(E.BaseField.fromU64(111));
+                const b = E.fromBase(E.BaseField.fromU64(222));
+                const c = E.fromBase(E.BaseField.fromU64(333));
+                try testing.expect(a.add(b).add(c).eql(a.add(b.add(c))));
+                try testing.expect(a.mul(b).mul(c).eql(a.mul(b.mul(c))));
+            }
+
+            test "extension: distributivity" {
+                const a = E.fromBase(E.BaseField.fromU64(111));
+                const b = E.fromBase(E.BaseField.fromU64(222));
+                const c = E.fromBase(E.BaseField.fromU64(333));
+                const lhs = a.mul(b.add(c));
+                const rhs = a.mul(b).add(a.mul(c));
+                try testing.expect(lhs.eql(rhs));
+            }
+
+            test "extension: fromBase embedding" {
+                const base_val = E.BaseField.fromU64(42);
+                const ext_val = E.fromBase(base_val);
+                // First coefficient should equal base value
+                try testing.expect(ext_val.coeffs[0].eql(base_val));
+                // Rest should be zero
+                inline for (1..E.DEGREE) |i| {
+                    try testing.expect(ext_val.coeffs[i].isZero());
+                }
+            }
+
+            test "extension: mulBase matches mul(fromBase)" {
+                const base_a = E.BaseField.fromU64(123);
+                const base_b = E.BaseField.fromU64(456);
+                const ext_a = E.fromBase(base_a);
+
+                const via_mulBase = ext_a.mulBase(base_b);
+                const via_mul = ext_a.mul(E.fromBase(base_b));
+
+                try testing.expect(via_mulBase.eql(via_mul));
+            }
+        };
+    }
+};
+
 /// Generic field tests that verify field axioms.
 /// Usage: `comptime { _ = field.tests(MyField); }`
 pub fn tests(comptime F: type) type {

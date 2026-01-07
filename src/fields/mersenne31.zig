@@ -138,7 +138,7 @@ pub const Mersenne31 = packed struct(u32) {
     pub fn linearCombineBatch(dst: []Mersenne31, a: []const Mersenne31, b: []const Mersenne31, r: Mersenne31) void {
         std.debug.assert(dst.len == a.len and a.len == b.len);
 
-        // TODO
+        // TODO why is this 4 as default?
         const simd = @import("../simd.zig");
         const VEC_LEN = simd.u32_len orelse 4;
 
@@ -303,6 +303,31 @@ pub const Mersenne31 = packed struct(u32) {
     }
 };
 
+// ============ Quadratic Extension Field ============ //
+
+/// Configuration for Mersenne31 quadratic extension.
+/// F_p^2 = F_p[x] / (x^2 - 11), where 11 is a quadratic non-residue.
+const ExtConfig = struct {
+    pub const Base = Mersenne31;
+    pub const degree = 2;
+
+    /// The non-residue W such that x^2 = W defines the extension.
+    /// 11 is a quadratic non-residue mod 2^31 - 1.
+    pub const W: u64 = 11;
+
+    /// Reduce polynomial of degree < 2*degree to degree < degree.
+    /// c0 + c1*x + c2*x^2 -> (c0 + c2*W) + c1*x
+    pub fn reduce(product: *const [3]Mersenne31) [2]Mersenne31 {
+        return .{
+            product[0].add(product[2].mul(Mersenne31.fromU64(W))),
+            product[1],
+        };
+    }
+};
+
+/// Quadratic extension of Mersenne31: elements of F_p^2.
+pub const Ext = Field.ExtField.init(ExtConfig);
+
 // Interface and generic tests
 comptime {
     Field.verify(Mersenne31);
@@ -311,9 +336,83 @@ comptime {
     // Verify packed struct layout for SIMD compatibility
     std.debug.assert(@sizeOf(Mersenne31) == 4);
     std.debug.assert(@bitSizeOf(Mersenne31) == 32);
+
+    // Extension field verification
+    Field.ExtField.verify(Ext);
+    _ = Field.ExtField.tests(Ext);
 }
 
 // ============ Mersenne31-Specific Tests ============ //
+
+// ============ Extension Field Tests ============ //
+
+test "Ext: multiplication uses irreducible correctly" {
+    // (0 + 1*x) * (0 + 1*x) = x^2 = 11 (since x^2 = W = 11)
+    const x = Ext{ .coeffs = .{ Mersenne31.zero, Mersenne31.one } };
+    const x_squared = x.mul(x);
+
+    // x^2 should equal 11 (embedded in extension)
+    const expected = Ext.fromBase(Mersenne31.fromU64(11));
+    try std.testing.expect(x_squared.eql(expected));
+}
+
+test "Ext: inversion" {
+    // Test that a * a^(-1) = 1 for various elements
+    const test_vals = [_][2]u64{
+        .{ 1, 0 }, // base field element
+        .{ 0, 1 }, // x
+        .{ 1, 1 }, // 1 + x
+        .{ 123, 456 }, // arbitrary
+    };
+
+    for (test_vals) |v| {
+        const a = Ext{ .coeffs = .{
+            Mersenne31.fromU64(v[0]),
+            Mersenne31.fromU64(v[1]),
+        } };
+        if (a.isZero()) continue;
+
+        const a_inv = a.inv();
+        const product = a.mul(a_inv);
+        try std.testing.expect(product.eql(Ext.one));
+    }
+}
+
+test "Ext: mulBase optimization" {
+    // mulBase should be equivalent to mul(fromBase) but faster
+    var prng = std.Random.DefaultPrng.init(12345);
+    const rng = prng.random();
+
+    for (0..10) |_| {
+        const ext_a = Ext.random(rng);
+        const base_b = Mersenne31.random(rng);
+
+        const via_mulBase = ext_a.mulBase(base_b);
+        const via_mul = ext_a.mul(Ext.fromBase(base_b));
+
+        try std.testing.expect(via_mulBase.eql(via_mul));
+    }
+}
+
+test "Ext.Batch: dotProductMixed" {
+    // dotProductMixed(bases, exts) = sum(bases[i] * exts[i])
+    const bases = [_]Mersenne31{
+        Mersenne31.fromU64(2),
+        Mersenne31.fromU64(3),
+        Mersenne31.fromU64(5),
+    };
+
+    // SoA storage: c0s and c1s separate
+    var c0s = [_]Mersenne31{ Mersenne31.fromU64(1), Mersenne31.fromU64(3), Mersenne31.fromU64(5) };
+    var c1s = [_]Mersenne31{ Mersenne31.fromU64(2), Mersenne31.fromU64(4), Mersenne31.fromU64(6) };
+    const batch = Ext.Batch{ .coeffs = .{ &c0s, &c1s } };
+
+    const result = batch.dotProductMixed(&bases);
+
+    // Manual: 2*(1+2x) + 3*(3+4x) + 5*(5+6x) = (2+9+25) + (4+12+30)x = 36 + 46x
+    const expected = Ext{ .coeffs = .{ Mersenne31.fromU64(36), Mersenne31.fromU64(46) } };
+    try std.testing.expect(result.eql(expected));
+}
 
 // ============ Reduction Edge Case Tests ============ //
 
