@@ -53,6 +53,7 @@ The recipient bears double-spend risk until they settle. This is how physical ca
 ### Vault Contract (L1)
 
 Holds stablecoin deposits. Accepts:
+
 - Deposits: user sends stablecoin, gets commitment published
 - Withdrawals: user proves ownership of unspent token, receives stablecoin
 
@@ -72,6 +73,7 @@ The accumulator is a PCD proof - it grows by O(1) per transfer regardless of his
 ### P2P Transfers (Offline)
 
 Sender proves:
+
 1. They own the token (know the commitment opening)
 2. The transfer is valid (amounts balance, rules satisfied)
 3. History is valid (accumulator carries forward)
@@ -83,18 +85,21 @@ Receiver gets a new token with updated accumulator. No server involved. Transfer
 Provides certainty that a token hasn't been double-spent. Multiple implementations possible:
 
 **Option 1: Nullifier Rollup**
+
 - Append-only nullifier set
 - Periodic ZK proof of batch validity
 - Anchors to L1
 - Cheap, batched, some latency
 
 **Option 2: Validator Certificates (Pod-style)**
+
 - Threshold of validators (2/3 signatures)
 - Each validator maintains local nullifier set
 - Signs only first spend they see
 - Fast (single round trip), no consensus needed
 
 **Option 3: Direct L1**
+
 - Submit nullifier directly to vault contract
 - Maximum security, highest cost
 - For high-value settlements
@@ -153,6 +158,7 @@ No trusted mint. No party can inflate supply or link transactions. No hard coord
 ## Why PCD
 
 Traditional ZK (single SNARK) requires proving entire history in one shot. PCD allows:
+
 - Incremental proving (each transfer adds O(1) work)
 - Client-side proving without massive computation
 - Flexible (can add features without new trusted setup)
@@ -162,6 +168,7 @@ Traditional ZK (single SNARK) requires proving entire history in one shot. PCD a
 Cryptography can prove computation but not global state. Double-spend prevention requires knowing "this nullifier was never used anywhere" - a universal negative that requires global knowledge.
 
 Rather than fight this limit, we embrace it:
+
 - Proofs handle validity (what cryptography can do)
 - Settlement handles uniqueness (what requires coordination)
 - Users choose when to coordinate based on their risk tolerance
@@ -175,6 +182,7 @@ Hardware secure enclaves (Apple Secure Enclave, Android StrongBox/TEE) can provi
 ### How It Works
 
 The device's secure enclave:
+
 1. Maintains a local nullifier set (survives app reinstalls)
 2. Refuses to sign a transfer if nullifier was already used on this device
 3. Provides remote attestation that the signing code is legitimate
@@ -212,11 +220,13 @@ Recipients can adjust acceptance thresholds based on attestation:
 ### Tradeoffs
 
 **Benefits:**
+
 - Instant additional trust without network round-trip
 - Raises attack cost (need multiple devices)
 - Graceful: works offline, enhances rather than replaces
 
 **Costs:**
+
 - Trust in hardware vendor (Apple/Google)
 - Platform-specific implementation
 - Privacy concern: attestation may leak device identity
@@ -225,9 +235,143 @@ Recipients can adjust acceptance thresholds based on attestation:
 ### Privacy Considerations
 
 Device attestations should be designed to avoid linking transactions:
+
 - Use blind attestation schemes where possible
 - Rotate attestation keys
 - Attest to "not double-spent" without revealing which device
+
+## Viewing Keys (Selective Disclosure)
+
+Viewing keys enable compliance and auditability without sacrificing privacy by default. Users can selectively reveal transaction history to authorized parties while retaining exclusive spending control.
+
+### Key Derivation
+
+```
+master_seed
+    │
+    ├── spending_key     Can transfer tokens (KEEP SECRET)
+    │
+    └── viewing_key      Can see transaction history (SHAREABLE)
+          │
+          ├── incoming_viewing_key    See received transactions
+          └── full_viewing_key        See all transactions + balances
+```
+
+The viewing key is cryptographically derived from the spending key, but the reverse is computationally infeasible. Sharing your viewing key cannot compromise your funds.
+
+### What Viewing Keys Reveal
+
+| Key Type | Reveals | Use Case |
+|----------|---------|----------|
+| Incoming viewing key | Deposits received, amounts, timestamps | Payment verification |
+| Full viewing key | All transactions, current balance, counterparties | Full audit |
+| Spending key | Everything + ability to spend | Never share |
+
+### Compliance Use Cases
+
+**Tax Reporting:**
+
+```
+User → Tax Authority: full_viewing_key for relevant period
+Authority: Can verify income, capital gains, holdings
+Authority: Cannot spend funds or see other accounts
+```
+
+**Business Audit:**
+
+```
+Company → Auditor: full_viewing_key for company wallet
+Auditor: Verify all transactions, reconcile books
+Auditor: Cannot move funds
+```
+
+**Payment Verification:**
+
+```
+Sender → Recipient: proof of payment (single transaction disclosure)
+Recipient: Verify payment was made
+Recipient: Cannot see sender's other transactions
+```
+
+**Legal Discovery:**
+
+```
+Court order → User must provide viewing_key
+Scoped: Only for relevant addresses/time periods
+User: Retains spending control
+```
+
+### Implementation with PCD
+
+The viewing key is embedded in the token structure:
+
+```
+Token = {
+    commitment: hide(value, owner_pubkey, blinding),
+    accumulator: PCD proof of valid history,
+    viewing_tag: encrypt(viewing_key, transaction_metadata),
+}
+
+Metadata encrypted under viewing_key:
+    - amount
+    - timestamp
+    - counterparty (if known)
+    - memo (optional)
+```
+
+Anyone with the viewing key can decrypt the metadata. Without it, the transaction is opaque.
+
+### Selective Disclosure Proofs
+
+For finer-grained disclosure, generate ZK proofs about transactions without revealing full history:
+
+```
+"I received at least $10,000 in Q4 2025"
+  → Proves aggregate without itemizing
+
+"This payment of $500 was made to address X"
+  → Proves single transaction
+
+"My balance is above $1,000"
+  → Proves solvency without exact amount
+
+"All my deposits came from compliant sources"
+  → Proves clean history without revealing sources
+```
+
+These use the viewing key to access data, then generate a ZK proof over that data.
+
+### Key Rotation
+
+Viewing keys can be rotated without moving funds:
+
+```
+1. Generate new viewing_key' from spending_key
+2. New transactions encrypted to viewing_key'
+3. Old viewing_key still decrypts historical transactions
+4. Compartmentalize: different auditors see different periods
+```
+
+### Trust Model
+
+| What | Who Knows |
+|------|-----------|
+| Transaction occurred | Only parties + anyone with viewing key |
+| Transaction details | Only with viewing key |
+| Spending ability | Only spending key holder |
+| Full history | Only full viewing key holder |
+
+**Privacy by default.** Disclosure is opt-in, scoped, and doesn't compromise spending authority.
+
+### Comparison to Other Systems
+
+| System | Disclosure Mechanism |
+|--------|---------------------|
+| Bitcoin | Fully transparent (no privacy) |
+| Monero | View keys (similar to this) |
+| Zcash | [Viewing keys](https://electriccoin.co/blog/explaining-viewing-keys-2/) (this design inspired by Zcash) |
+| Tornado Cash | No disclosure mechanism (contributed to OFAC sanctions) |
+| This system | Viewing keys + selective ZK proofs |
 
 ## Open Design Questions
 
@@ -454,6 +598,7 @@ Expected value: 0.1% × $0.10 = $0.0001 per chunk ✓
 ```
 
 Benefits:
+
 - 99.9% of chunks: fast signatures only
 - 0.1% of chunks: full PCD proof
 - Correct expected payment
@@ -533,6 +678,7 @@ WinningChunkProof = PCD.prove(
 ```
 
 The verifier confirms:
+
 1. Chunk content matches claimed hash
 2. Session entropy matches committed value
 3. Lottery result is correctly computed

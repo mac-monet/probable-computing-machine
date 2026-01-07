@@ -66,4 +66,5 @@ test {
     // Constraint system
     _ = @import("constraint/constraint.zig");
     _ = @import("constraint/trace.zig");
+    _ = @import("constraint/builder.zig");
 }

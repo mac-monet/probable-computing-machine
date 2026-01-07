@@ -26,7 +26,7 @@ The row offset (rotation) enables state machine semantics like AIR, while the po
 
 ```
 src/constraint/
-├── trace.zig           # Column storage (replaces existing trace.zig)
+├── trace.zig           # Column storage
 ├── constraint.zig      # Cell, Term, Constraint types + evaluation
 └── builder.zig         # Ergonomic API for common gates
 

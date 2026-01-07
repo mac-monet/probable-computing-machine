@@ -16,19 +16,21 @@ pub fn CircuitBuilder(comptime F: type) type {
         const Self = @This();
 
         allocator: Allocator,
+        arena: std.heap.ArenaAllocator,
         trace: Trace,
         constraints: ConstraintSet,
 
         pub fn init(allocator: Allocator, num_rows: usize) !Self {
-            var trace = try Trace.init(allocator, num_rows);
             return .{
                 .allocator = allocator,
-                .trace = trace,
-                .constraints = ConstraintSet.init(allocator, &trace),
+                .arena = std.heap.ArenaAllocator.init(allocator),
+                .trace = try Trace.init(allocator, num_rows),
+                .constraints = ConstraintSet.init(allocator),
             };
         }
 
         pub fn deinit(self: *Self) void {
+            self.arena.deinit();
             self.constraints.deinit();
             self.trace.deinit();
         }
@@ -49,7 +51,9 @@ pub fn CircuitBuilder(comptime F: type) type {
 
         /// a + b = c
         pub fn addGate(self: *Self, a: usize, b: usize, c: usize) !void {
-            const terms = try self.allocator.alloc(Term, 3);
+            try self.validateColumns(&.{ a, b, c });
+            const arena_alloc = self.arena.allocator();
+            const terms = try arena_alloc.alloc(Term, 3);
             terms[0] = .{ .product = .{ .coeff = F.one, .cells = try self.cellSlice(&.{.{ .col = a }}) } };
             terms[1] = .{ .product = .{ .coeff = F.one, .cells = try self.cellSlice(&.{.{ .col = b }}) } };
             terms[2] = .{ .product = .{ .coeff = F.one.neg(), .cells = try self.cellSlice(&.{.{ .col = c }}) } };
@@ -58,7 +62,9 @@ pub fn CircuitBuilder(comptime F: type) type {
 
         /// a - b = c
         pub fn subGate(self: *Self, a: usize, b: usize, c: usize) !void {
-            const terms = try self.allocator.alloc(Term, 3);
+            try self.validateColumns(&.{ a, b, c });
+            const arena_alloc = self.arena.allocator();
+            const terms = try arena_alloc.alloc(Term, 3);
             terms[0] = .{ .product = .{ .coeff = F.one, .cells = try self.cellSlice(&.{.{ .col = a }}) } };
             terms[1] = .{ .product = .{ .coeff = F.one.neg(), .cells = try self.cellSlice(&.{.{ .col = b }}) } };
             terms[2] = .{ .product = .{ .coeff = F.one.neg(), .cells = try self.cellSlice(&.{.{ .col = c }}) } };
@@ -67,7 +73,9 @@ pub fn CircuitBuilder(comptime F: type) type {
 
         /// a * b = c
         pub fn mulGate(self: *Self, a: usize, b: usize, c: usize) !void {
-            const terms = try self.allocator.alloc(Term, 2);
+            try self.validateColumns(&.{ a, b, c });
+            const arena_alloc = self.arena.allocator();
+            const terms = try arena_alloc.alloc(Term, 2);
             terms[0] = .{ .product = .{ .coeff = F.one, .cells = try self.cellSlice(&.{ .{ .col = a }, .{ .col = b } }) } };
             terms[1] = .{ .product = .{ .coeff = F.one.neg(), .cells = try self.cellSlice(&.{.{ .col = c }}) } };
             try self.constraints.add(terms);
@@ -75,7 +83,9 @@ pub fn CircuitBuilder(comptime F: type) type {
 
         /// a = constant
         pub fn constGate(self: *Self, a: usize, constant: F) !void {
-            const terms = try self.allocator.alloc(Term, 2);
+            try self.validateColumns(&.{a});
+            const arena_alloc = self.arena.allocator();
+            const terms = try arena_alloc.alloc(Term, 2);
             terms[0] = .{ .product = .{ .coeff = F.one, .cells = try self.cellSlice(&.{.{ .col = a }}) } };
             terms[1] = .{ .constant = constant.neg() };
             try self.constraints.add(terms);
@@ -83,14 +93,18 @@ pub fn CircuitBuilder(comptime F: type) type {
 
         /// a = 0
         pub fn assertZero(self: *Self, a: usize) !void {
-            const terms = try self.allocator.alloc(Term, 1);
+            try self.validateColumns(&.{a});
+            const arena_alloc = self.arena.allocator();
+            const terms = try arena_alloc.alloc(Term, 1);
             terms[0] = .{ .product = .{ .coeff = F.one, .cells = try self.cellSlice(&.{.{ .col = a }}) } };
             try self.constraints.add(terms);
         }
 
         /// selector * (a * b - c) = 0  (conditional multiplication)
         pub fn conditionalMul(self: *Self, sel: usize, a: usize, b: usize, c: usize) !void {
-            const terms = try self.allocator.alloc(Term, 2);
+            try self.validateColumns(&.{ sel, a, b, c });
+            const arena_alloc = self.arena.allocator();
+            const terms = try arena_alloc.alloc(Term, 2);
             terms[0] = .{ .product = .{ .coeff = F.one, .cells = try self.cellSlice(&.{ .{ .col = sel }, .{ .col = a }, .{ .col = b } }) } };
             terms[1] = .{ .product = .{ .coeff = F.one.neg(), .cells = try self.cellSlice(&.{ .{ .col = sel }, .{ .col = c } }) } };
             try self.constraints.add(terms);
@@ -98,7 +112,9 @@ pub fn CircuitBuilder(comptime F: type) type {
 
         /// col[row+1] = col[row] + delta[row]  (state transition)
         pub fn transition(self: *Self, col: usize, delta: usize) !void {
-            const terms = try self.allocator.alloc(Term, 3);
+            try self.validateColumns(&.{ col, delta });
+            const arena_alloc = self.arena.allocator();
+            const terms = try arena_alloc.alloc(Term, 3);
             terms[0] = .{ .product = .{ .coeff = F.one, .cells = try self.cellSlice(&.{.{ .col = col, .rot = 1 }}) } };
             terms[1] = .{ .product = .{ .coeff = F.one.neg(), .cells = try self.cellSlice(&.{.{ .col = col, .rot = 0 }}) } };
             terms[2] = .{ .product = .{ .coeff = F.one.neg(), .cells = try self.cellSlice(&.{.{ .col = delta, .rot = 0 }}) } };
@@ -107,7 +123,9 @@ pub fn CircuitBuilder(comptime F: type) type {
 
         /// selector * (col[row+1] - col[row] - delta[row]) = 0  (conditional transition)
         pub fn conditionalTransition(self: *Self, sel: usize, col: usize, delta: usize) !void {
-            const terms = try self.allocator.alloc(Term, 3);
+            try self.validateColumns(&.{ sel, col, delta });
+            const arena_alloc = self.arena.allocator();
+            const terms = try arena_alloc.alloc(Term, 3);
             terms[0] = .{ .product = .{ .coeff = F.one, .cells = try self.cellSlice(&.{ .{ .col = sel }, .{ .col = col, .rot = 1 } }) } };
             terms[1] = .{ .product = .{ .coeff = F.one.neg(), .cells = try self.cellSlice(&.{ .{ .col = sel }, .{ .col = col, .rot = 0 } }) } };
             terms[2] = .{ .product = .{ .coeff = F.one.neg(), .cells = try self.cellSlice(&.{ .{ .col = sel }, .{ .col = delta, .rot = 0 } }) } };
@@ -116,7 +134,7 @@ pub fn CircuitBuilder(comptime F: type) type {
 
         // === Custom constraints ===
 
-        /// Add arbitrary constraint
+        /// Add arbitrary constraint (caller responsible for column validation)
         pub fn addConstraint(self: *Self, terms: []const Term) !void {
             try self.constraints.add(terms);
         }
@@ -138,8 +156,15 @@ pub fn CircuitBuilder(comptime F: type) type {
 
         // === Internal helpers ===
 
+        fn validateColumns(self: *Self, cols: []const usize) !void {
+            const num_cols = self.trace.numColumns();
+            for (cols) |col| {
+                if (col >= num_cols) return error.InvalidColumn;
+            }
+        }
+
         fn cellSlice(self: *Self, cells: []const Cell) ![]const Cell {
-            return self.allocator.dupe(Cell, cells);
+            return self.arena.allocator().dupe(Cell, cells);
         }
     };
 }
@@ -148,7 +173,7 @@ pub fn CircuitBuilder(comptime F: type) type {
 
 const testing = std.testing;
 const M31 = @import("../fields/mersenne31.zig").Mersenne31;
-const CS = constraint_mod.ConstraintSystem(M31);
+const CSTester = constraint_mod.ConstraintSystem(M31);
 const Builder = CircuitBuilder(M31);
 
 test "CircuitBuilder: init and deinit" {
@@ -202,10 +227,10 @@ test "CircuitBuilder: mulGate - satisfied" {
     }
 
     const result = builder.build();
-    const evals = try CS.evaluate(result.constraints, result.trace, testing.allocator);
+    const evals = try CSTester.evaluate(result.constraints, result.trace, testing.allocator);
     defer testing.allocator.free(evals);
 
-    try testing.expect(CS.isSatisfied(evals) == null);
+    try testing.expect(CSTester.isSatisfied(evals) == null);
 }
 
 test "CircuitBuilder: addGate - satisfied" {
@@ -230,10 +255,10 @@ test "CircuitBuilder: addGate - satisfied" {
     }
 
     const result = builder.build();
-    const evals = try CS.evaluate(result.constraints, result.trace, testing.allocator);
+    const evals = try CSTester.evaluate(result.constraints, result.trace, testing.allocator);
     defer testing.allocator.free(evals);
 
-    try testing.expect(CS.isSatisfied(evals) == null);
+    try testing.expect(CSTester.isSatisfied(evals) == null);
 }
 
 test "CircuitBuilder: subGate - satisfied" {
@@ -258,10 +283,10 @@ test "CircuitBuilder: subGate - satisfied" {
     }
 
     const result = builder.build();
-    const evals = try CS.evaluate(result.constraints, result.trace, testing.allocator);
+    const evals = try CSTester.evaluate(result.constraints, result.trace, testing.allocator);
     defer testing.allocator.free(evals);
 
-    try testing.expect(CS.isSatisfied(evals) == null);
+    try testing.expect(CSTester.isSatisfied(evals) == null);
 }
 
 test "CircuitBuilder: constGate - satisfied" {
@@ -278,10 +303,10 @@ test "CircuitBuilder: constGate - satisfied" {
     }
 
     const result = builder.build();
-    const evals = try CS.evaluate(result.constraints, result.trace, testing.allocator);
+    const evals = try CSTester.evaluate(result.constraints, result.trace, testing.allocator);
     defer testing.allocator.free(evals);
 
-    try testing.expect(CS.isSatisfied(evals) == null);
+    try testing.expect(CSTester.isSatisfied(evals) == null);
 }
 
 test "CircuitBuilder: assertZero - satisfied" {
@@ -298,10 +323,10 @@ test "CircuitBuilder: assertZero - satisfied" {
     }
 
     const result = builder.build();
-    const evals = try CS.evaluate(result.constraints, result.trace, testing.allocator);
+    const evals = try CSTester.evaluate(result.constraints, result.trace, testing.allocator);
     defer testing.allocator.free(evals);
 
-    try testing.expect(CS.isSatisfied(evals) == null);
+    try testing.expect(CSTester.isSatisfied(evals) == null);
 }
 
 test "CircuitBuilder: assertZero - unsatisfied" {
@@ -319,10 +344,10 @@ test "CircuitBuilder: assertZero - unsatisfied" {
     }
 
     const result = builder.build();
-    const evals = try CS.evaluate(result.constraints, result.trace, testing.allocator);
+    const evals = try CSTester.evaluate(result.constraints, result.trace, testing.allocator);
     defer testing.allocator.free(evals);
 
-    try testing.expectEqual(@as(?usize, 0), CS.isSatisfied(evals));
+    try testing.expectEqual(@as(?usize, 0), CSTester.isSatisfied(evals));
 }
 
 test "CircuitBuilder: chained arithmetic (mul then add)" {
@@ -357,10 +382,10 @@ test "CircuitBuilder: chained arithmetic (mul then add)" {
     }
 
     const result = builder.build();
-    const evals = try CS.evaluate(result.constraints, result.trace, testing.allocator);
+    const evals = try CSTester.evaluate(result.constraints, result.trace, testing.allocator);
     defer testing.allocator.free(evals);
 
-    try testing.expect(CS.isSatisfied(evals) == null);
+    try testing.expect(CSTester.isSatisfied(evals) == null);
 }
 
 test "CircuitBuilder: transition gate" {
@@ -386,10 +411,10 @@ test "CircuitBuilder: transition gate" {
     try builder.set(delta, 3, M31.zero); // unused
 
     const result = builder.build();
-    const evals = try CS.evaluate(result.constraints, result.trace, testing.allocator);
+    const evals = try CSTester.evaluate(result.constraints, result.trace, testing.allocator);
     defer testing.allocator.free(evals);
 
-    try testing.expect(CS.isSatisfied(evals) == null);
+    try testing.expect(CSTester.isSatisfied(evals) == null);
 }
 
 test "CircuitBuilder: conditionalMul - selector enabled" {
@@ -417,10 +442,10 @@ test "CircuitBuilder: conditionalMul - selector enabled" {
     }
 
     const result = builder.build();
-    const evals = try CS.evaluate(result.constraints, result.trace, testing.allocator);
+    const evals = try CSTester.evaluate(result.constraints, result.trace, testing.allocator);
     defer testing.allocator.free(evals);
 
-    try testing.expect(CS.isSatisfied(evals) == null);
+    try testing.expect(CSTester.isSatisfied(evals) == null);
 }
 
 test "CircuitBuilder: conditionalMul - selector disabled" {
@@ -448,10 +473,10 @@ test "CircuitBuilder: conditionalMul - selector disabled" {
     }
 
     const result = builder.build();
-    const evals = try CS.evaluate(result.constraints, result.trace, testing.allocator);
+    const evals = try CSTester.evaluate(result.constraints, result.trace, testing.allocator);
     defer testing.allocator.free(evals);
 
-    try testing.expect(CS.isSatisfied(evals) == null);
+    try testing.expect(CSTester.isSatisfied(evals) == null);
 }
 
 test "CircuitBuilder: conditionalTransition" {
@@ -483,10 +508,10 @@ test "CircuitBuilder: conditionalTransition" {
     try builder.set(delta, 3, M31.zero);
 
     const result = builder.build();
-    const evals = try CS.evaluate(result.constraints, result.trace, testing.allocator);
+    const evals = try CSTester.evaluate(result.constraints, result.trace, testing.allocator);
     defer testing.allocator.free(evals);
 
-    try testing.expect(CS.isSatisfied(evals) == null);
+    try testing.expect(CSTester.isSatisfied(evals) == null);
 }
 
 test "CircuitBuilder: addConstraint for custom constraint" {
@@ -497,9 +522,11 @@ test "CircuitBuilder: addConstraint for custom constraint" {
     const b = try builder.addWitness();
 
     // Custom: a^2 - b = 0 (a squared equals b)
-    const terms = try builder.allocator.alloc(CS.Term, 2);
-    terms[0] = .{ .product = .{ .coeff = M31.one, .cells = try builder.allocator.dupe(Cell, &.{ .{ .col = a }, .{ .col = a } }) } };
-    terms[1] = .{ .product = .{ .coeff = M31.one.neg(), .cells = try builder.allocator.dupe(Cell, &.{.{ .col = b }}) } };
+    // Use the builder's arena allocator so memory is cleaned up with the builder
+    const arena_alloc = builder.arena.allocator();
+    const terms = try arena_alloc.alloc(CSTester.Term, 2);
+    terms[0] = .{ .product = .{ .coeff = M31.one, .cells = try arena_alloc.dupe(Cell, &.{ .{ .col = a }, .{ .col = a } }) } };
+    terms[1] = .{ .product = .{ .coeff = M31.one.neg(), .cells = try arena_alloc.dupe(Cell, &.{.{ .col = b }}) } };
     try builder.addConstraint(terms);
 
     // 5^2 = 25
@@ -512,8 +539,8 @@ test "CircuitBuilder: addConstraint for custom constraint" {
     }
 
     const result = builder.build();
-    const evals = try CS.evaluate(result.constraints, result.trace, testing.allocator);
+    const evals = try CSTester.evaluate(result.constraints, result.trace, testing.allocator);
     defer testing.allocator.free(evals);
 
-    try testing.expect(CS.isSatisfied(evals) == null);
+    try testing.expect(CSTester.isSatisfied(evals) == null);
 }

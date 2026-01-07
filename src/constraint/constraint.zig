@@ -96,18 +96,16 @@ pub fn ConstraintSystem(comptime F: type) type {
             }
         };
 
-        /// Collection of constraints with column validation.
-        /// Validates that all column references exist in the trace before adding constraints.
+        /// Collection of constraints (simple storage).
+        /// Validation of column references should be done by the caller (e.g., CircuitBuilder).
         pub const ConstraintSet = struct {
             constraints: std.ArrayListUnmanaged(Constraint),
             allocator: std.mem.Allocator,
-            trace: *const Trace,
 
-            pub fn init(allocator: std.mem.Allocator, trace: *const Trace) ConstraintSet {
+            pub fn init(allocator: std.mem.Allocator) ConstraintSet {
                 return .{
                     .constraints = .{},
                     .allocator = allocator,
-                    .trace = trace,
                 };
             }
 
@@ -115,21 +113,8 @@ pub fn ConstraintSystem(comptime F: type) type {
                 self.constraints.deinit(self.allocator);
             }
 
-            /// Add a constraint, validating that all column references exist in the trace.
-            /// Returns error.InvalidColumn if any term references a non-existent column.
+            /// Add a constraint to the set.
             pub fn add(self: *ConstraintSet, terms: []const Term) !void {
-                for (terms) |term| {
-                    switch (term) {
-                        .constant => {},
-                        .product => |p| {
-                            for (p.cells) |cell| {
-                                if (cell.col >= self.trace.numColumns()) {
-                                    return error.InvalidColumn;
-                                }
-                            }
-                        },
-                    }
-                }
                 try self.constraints.append(self.allocator, .{ .terms = terms });
             }
 
@@ -533,29 +518,20 @@ test "Constraint: evaluate fibonacci via rotation" {
 // ============ ConstraintSet Tests ============ //
 
 test "ConstraintSet: init and deinit" {
-    var trace = try CS.Trace.init(testing.allocator, 4);
-    defer trace.deinit();
-
-    var cs = CS.ConstraintSet.init(testing.allocator, &trace);
+    var cs = CS.ConstraintSet.init(testing.allocator);
     defer cs.deinit();
 
     try testing.expectEqual(@as(usize, 0), cs.len());
 }
 
-test "ConstraintSet: add valid constraint" {
-    var trace = try CS.Trace.init(testing.allocator, 4);
-    defer trace.deinit();
-
-    const a = try trace.addColumn();
-    const b = try trace.addColumn();
-
-    var cs = CS.ConstraintSet.init(testing.allocator, &trace);
+test "ConstraintSet: add constraint" {
+    var cs = CS.ConstraintSet.init(testing.allocator);
     defer cs.deinit();
 
     // a + b = 0 constraint
     const terms = &[_]CS.Term{
-        .{ .product = .{ .coeff = M31.one, .cells = &.{.{ .col = a }} } },
-        .{ .product = .{ .coeff = M31.one, .cells = &.{.{ .col = b }} } },
+        .{ .product = .{ .coeff = M31.one, .cells = &.{.{ .col = 0 }} } },
+        .{ .product = .{ .coeff = M31.one, .cells = &.{.{ .col = 1 }} } },
     };
 
     try cs.add(terms);
@@ -563,26 +539,19 @@ test "ConstraintSet: add valid constraint" {
 }
 
 test "ConstraintSet: add multiple constraints" {
-    var trace = try CS.Trace.init(testing.allocator, 4);
-    defer trace.deinit();
-
-    const a = try trace.addColumn();
-    const b = try trace.addColumn();
-    const c = try trace.addColumn();
-
-    var cs = CS.ConstraintSet.init(testing.allocator, &trace);
+    var cs = CS.ConstraintSet.init(testing.allocator);
     defer cs.deinit();
 
     // First constraint: a + b = 0
     const terms1 = &[_]CS.Term{
-        .{ .product = .{ .coeff = M31.one, .cells = &.{.{ .col = a }} } },
-        .{ .product = .{ .coeff = M31.one, .cells = &.{.{ .col = b }} } },
+        .{ .product = .{ .coeff = M31.one, .cells = &.{.{ .col = 0 }} } },
+        .{ .product = .{ .coeff = M31.one, .cells = &.{.{ .col = 1 }} } },
     };
     try cs.add(terms1);
 
     // Second constraint: b * c = 0
     const terms2 = &[_]CS.Term{
-        .{ .product = .{ .coeff = M31.one, .cells = &.{ .{ .col = b }, .{ .col = c } } } },
+        .{ .product = .{ .coeff = M31.one, .cells = &.{ .{ .col = 1 }, .{ .col = 2 } } } },
     };
     try cs.add(terms2);
 
@@ -590,105 +559,13 @@ test "ConstraintSet: add multiple constraints" {
 }
 
 test "ConstraintSet: add constraint with constant term" {
-    var trace = try CS.Trace.init(testing.allocator, 4);
-    defer trace.deinit();
-
-    const a = try trace.addColumn();
-
-    var cs = CS.ConstraintSet.init(testing.allocator, &trace);
+    var cs = CS.ConstraintSet.init(testing.allocator);
     defer cs.deinit();
 
     // a - 42 = 0 constraint
     const terms = &[_]CS.Term{
-        .{ .product = .{ .coeff = M31.one, .cells = &.{.{ .col = a }} } },
-        .{ .constant = M31.fromU64(42).neg() },
-    };
-
-    try cs.add(terms);
-    try testing.expectEqual(@as(usize, 1), cs.len());
-}
-
-test "ConstraintSet: error on invalid column" {
-    var trace = try CS.Trace.init(testing.allocator, 4);
-    defer trace.deinit();
-
-    _ = try trace.addColumn(); // column 0 exists
-
-    var cs = CS.ConstraintSet.init(testing.allocator, &trace);
-    defer cs.deinit();
-
-    // Reference column 1, which doesn't exist
-    const terms = &[_]CS.Term{
-        .{ .product = .{ .coeff = M31.one, .cells = &.{.{ .col = 1 }} } },
-    };
-
-    try testing.expectError(error.InvalidColumn, cs.add(terms));
-    try testing.expectEqual(@as(usize, 0), cs.len());
-}
-
-test "ConstraintSet: error on invalid column in multi-cell product" {
-    var trace = try CS.Trace.init(testing.allocator, 4);
-    defer trace.deinit();
-
-    const a = try trace.addColumn(); // column 0
-    _ = try trace.addColumn(); // column 1
-
-    var cs = CS.ConstraintSet.init(testing.allocator, &trace);
-    defer cs.deinit();
-
-    // First cell valid, second cell references non-existent column 5
-    const terms = &[_]CS.Term{
-        .{ .product = .{ .coeff = M31.one, .cells = &.{ .{ .col = a }, .{ .col = 5 } } } },
-    };
-
-    try testing.expectError(error.InvalidColumn, cs.add(terms));
-}
-
-test "ConstraintSet: constraint with rotation validates column" {
-    var trace = try CS.Trace.init(testing.allocator, 4);
-    defer trace.deinit();
-
-    const a = try trace.addColumn();
-
-    var cs = CS.ConstraintSet.init(testing.allocator, &trace);
-    defer cs.deinit();
-
-    // Valid column with rotation should work
-    const terms = &[_]CS.Term{
-        .{ .product = .{ .coeff = M31.one, .cells = &.{.{ .col = a, .rot = 1 }} } },
-    };
-
-    try cs.add(terms);
-    try testing.expectEqual(@as(usize, 1), cs.len());
-}
-
-test "ConstraintSet: empty trace rejects all column references" {
-    var trace = try CS.Trace.init(testing.allocator, 4);
-    defer trace.deinit();
-
-    // No columns added
-
-    var cs = CS.ConstraintSet.init(testing.allocator, &trace);
-    defer cs.deinit();
-
-    const terms = &[_]CS.Term{
         .{ .product = .{ .coeff = M31.one, .cells = &.{.{ .col = 0 }} } },
-    };
-
-    try testing.expectError(error.InvalidColumn, cs.add(terms));
-}
-
-test "ConstraintSet: constant-only constraint always valid" {
-    var trace = try CS.Trace.init(testing.allocator, 4);
-    defer trace.deinit();
-
-    // No columns needed for constant-only constraint
-
-    var cs = CS.ConstraintSet.init(testing.allocator, &trace);
-    defer cs.deinit();
-
-    const terms = &[_]CS.Term{
-        .{ .constant = M31.fromU64(0) },
+        .{ .constant = M31.fromU64(42).neg() },
     };
 
     try cs.add(terms);
