@@ -20,15 +20,6 @@ pub const constraint = @import("constraint/constraint.zig");
 // Re-export trace system (constraint trace, not vm trace)
 pub const trace = @import("constraint/trace.zig");
 
-// Re-export VM modules
-pub const vm = struct {
-    pub const stack = @import("vm/stack.zig");
-    pub const trace = @import("vm/trace.zig");
-    pub const constraints = @import("vm/constraints.zig");
-    pub const prover = @import("vm/prover.zig");
-    pub const verifier = @import("vm/verifier.zig");
-};
-
 pub fn bufferedPrint() !void {
     // Stdout is for the actual output of your application, for example if you
     // are implementing gzip, then only the compressed bytes should be sent to
@@ -50,14 +41,8 @@ test {
     _ = @import("core/transcript.zig");
     _ = @import("merkle/root.zig");
     _ = @import("pcs/basefold.zig");
-    _ = @import("vm/stack.zig");
-    _ = @import("vm/trace.zig");
-    _ = @import("vm/constraints.zig");
-    _ = @import("vm/prover.zig");
-    _ = @import("vm/verifier.zig");
-    _ = @import("vm/proof_test.zig");
 
-    // New architecture
+    // Core architecture
     _ = @import("core/tracer.zig");
     _ = @import("core/context.zig");
     _ = @import("iop/sumcheck.zig");
