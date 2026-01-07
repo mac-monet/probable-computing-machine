@@ -304,19 +304,6 @@ test "Term: evaluate returns error on rotation out of bounds" {
     try testing.expectError(error.RotationOutOfBounds, term.evaluate(&trace, 3));
 }
 
-test "Term: evaluate returns error on unset cell" {
-    var trace = try CS.Trace.init(testing.allocator, 4);
-    defer trace.deinit();
-
-    const col = try trace.addColumn();
-    // Don't set any values
-
-    const cells = &[_]Cell{.{ .col = col }};
-    const term = CS.Term{ .product = .{ .coeff = M31.one, .cells = cells } };
-
-    try testing.expectError(error.CellNotSet, term.evaluate(&trace, 0));
-}
-
 // ============ Constraint Tests ============ //
 
 test "Constraint: validRowRange with no rotations" {

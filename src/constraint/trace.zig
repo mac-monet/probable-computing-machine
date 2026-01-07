@@ -16,9 +16,6 @@ pub fn Trace(comptime F: type) type {
         /// Column-major for cache-friendly polynomial ops
         columns: std.ArrayListUnmanaged([]F),
 
-        /// Track which cells have been set (for error detection)
-        set_flags: std.ArrayListUnmanaged([]bool),
-
         /// Which columns are public (for verification)
         public_columns: std.ArrayListUnmanaged(usize),
 
@@ -31,7 +28,6 @@ pub fn Trace(comptime F: type) type {
                 .allocator = allocator,
                 .num_rows = num_rows,
                 .columns = .{},
-                .set_flags = .{},
                 .public_columns = .{},
             };
         }
@@ -40,11 +36,7 @@ pub fn Trace(comptime F: type) type {
             for (self.columns.items) |col| {
                 self.allocator.free(col);
             }
-            for (self.set_flags.items) |flags| {
-                self.allocator.free(flags);
-            }
             self.columns.deinit(self.allocator);
-            self.set_flags.deinit(self.allocator);
             self.public_columns.deinit(self.allocator);
         }
 
@@ -52,13 +44,7 @@ pub fn Trace(comptime F: type) type {
         pub fn addColumn(self: *Self) !usize {
             const col = try self.allocator.alloc(F, self.num_rows);
             @memset(col, F.zero);
-
-            const flags = try self.allocator.alloc(bool, self.num_rows);
-            @memset(flags, false);
-
             try self.columns.append(self.allocator, col);
-            try self.set_flags.append(self.allocator, flags);
-
             return self.columns.items.len - 1;
         }
 
@@ -95,11 +81,9 @@ pub fn Trace(comptime F: type) type {
                 return error.InvalidRow;
             }
             self.columns.items[col][row] = val;
-            self.set_flags.items[col][row] = true;
         }
 
         /// Get a cell value with rotation
-        /// Returns error if cell was never set or rotation is out of bounds
         pub fn get(self: *const Self, col: usize, row: usize, rot: i32) !F {
             if (col >= self.columns.items.len) {
                 return error.InvalidColumn;
@@ -113,11 +97,6 @@ pub fn Trace(comptime F: type) type {
             }
 
             const actual_row: usize = @intCast(actual_row_i64);
-
-            if (!self.set_flags.items[col][actual_row]) {
-                return error.CellNotSet;
-            }
-
             return self.columns.items[col][actual_row];
         }
     };
@@ -223,16 +202,6 @@ test "Trace: get returns error on rotation out of bounds" {
 
     // From row 3, cannot go to row 4
     try testing.expectError(error.RotationOutOfBounds, trace.get(col, 3, 1));
-}
-
-test "Trace: get returns error on unset cell" {
-    var trace = try Trace(M31).init(testing.allocator, 4);
-    defer trace.deinit();
-
-    const col = try trace.addColumn();
-    // Column added but no values set
-
-    try testing.expectError(error.CellNotSet, trace.get(col, 0, 0));
 }
 
 test "Trace: markPublic validates column" {
