@@ -4,6 +4,7 @@ const std = @import("std");
 pub const Mersenne31 = @import("fields/mersenne31.zig").Mersenne31;
 pub const multilinear = @import("poly/multilinear.zig");
 pub const sumcheck = @import("iop/sumcheck.zig");
+pub const zerocheck = @import("iop/zerocheck.zig");
 pub const Transcript = @import("core/transcript.zig").Transcript;
 pub const merkle = @import("merkle/root.zig");
 pub const constraint = @import("constraint/constraint.zig");
@@ -22,6 +23,7 @@ test {
     _ = @import("core/tracer.zig");
     _ = @import("core/context.zig");
     _ = @import("iop/sumcheck.zig");
+    _ = @import("iop/zerocheck.zig");
     _ = @import("pcs/pcs.zig");
 
     // Constraint system
