@@ -5,24 +5,24 @@
 //! - Reusable hasher context
 //! - Bounded proofs (fixed buffer, no heap)
 //! - Direction bits derived from leaf index
+//! - Comptime max_depth for right-sized proofs
 
 const std = @import("std");
 
-/// Maximum tree depth (supports up to 2^32 leaves)
-pub const MAX_DEPTH = 32;
-
-/// Create a Merkle tree type parameterized by field and hasher.
-pub fn MerkleTree(comptime F: type, comptime Hasher: type) type {
+/// Create a Merkle tree type parameterized by field, hasher, and max depth.
+/// max_depth determines proof buffer size: 2^max_depth max leaves.
+pub fn MerkleTree(comptime F: type, comptime Hasher: type, comptime max_depth: u8) type {
     return struct {
         const Self = @This();
 
         pub const Digest = Hasher.Digest;
         pub const Commitment = Digest;
+        pub const MAX_DEPTH = max_depth;
 
         /// Authentication path with bounded capacity (no heap allocation)
         pub const Proof = struct {
             /// Sibling hashes from leaf to root (fixed buffer)
-            path_buffer: [MAX_DEPTH]Digest,
+            path_buffer: [max_depth]Digest,
             /// Number of valid entries in path
             path_len: usize,
             /// Leaf index - direction bits derived from this
@@ -253,9 +253,12 @@ pub fn MerkleTree(comptime F: type, comptime Hasher: type) type {
 const M31 = @import("../fields/mersenne31.zig").Mersenne31;
 const Blake3Hasher = @import("hashers.zig").Blake3Hasher;
 
+// Use depth 16 for tests (64K max leaves, ~1KB proofs)
+const TestMerkle = MerkleTree(M31, Blake3Hasher, 16);
+
 test "commit and verify single leaf" {
     var hasher = Blake3Hasher.init();
-    const Merkle = MerkleTree(M31, Blake3Hasher);
+    const Merkle = TestMerkle;
 
     const evals = [_]M31{M31.fromU64(42)};
     var scratch: [1]Merkle.Digest = undefined;
@@ -270,7 +273,7 @@ test "commit and verify single leaf" {
 
 test "commit deterministic" {
     var hasher = Blake3Hasher.init();
-    const Merkle = MerkleTree(M31, Blake3Hasher);
+    const Merkle = TestMerkle;
 
     const evals = [_]M31{
         M31.fromU64(1),
@@ -290,7 +293,7 @@ test "commit deterministic" {
 
 test "open and verify all leaves" {
     var hasher = Blake3Hasher.init();
-    const Merkle = MerkleTree(M31, Blake3Hasher);
+    const Merkle = TestMerkle;
 
     const evals = [_]M31{
         M31.fromU64(1),
@@ -315,7 +318,7 @@ test "open and verify all leaves" {
 
 test "open batch" {
     var hasher = Blake3Hasher.init();
-    const Merkle = MerkleTree(M31, Blake3Hasher);
+    const Merkle = TestMerkle;
 
     const evals = [_]M31{
         M31.fromU64(1),
@@ -345,7 +348,7 @@ test "open batch" {
 
 test "verify rejects wrong value" {
     var hasher = Blake3Hasher.init();
-    const Merkle = MerkleTree(M31, Blake3Hasher);
+    const Merkle = TestMerkle;
 
     const evals = [_]M31{
         M31.fromU64(1),
@@ -369,7 +372,7 @@ test "verify rejects wrong value" {
 
 test "verify rejects wrong proof" {
     var hasher = Blake3Hasher.init();
-    const Merkle = MerkleTree(M31, Blake3Hasher);
+    const Merkle = TestMerkle;
 
     const evals = [_]M31{
         M31.fromU64(1),
@@ -394,7 +397,7 @@ test "verify rejects wrong proof" {
 
 test "large tree" {
     var hasher = Blake3Hasher.init();
-    const Merkle = MerkleTree(M31, Blake3Hasher);
+    const Merkle = TestMerkle;
 
     const N = 1024;
     var evals: [N]M31 = undefined;
@@ -417,7 +420,7 @@ test "large tree" {
 }
 
 test "proof direction bits" {
-    const Merkle = MerkleTree(M31, Blake3Hasher);
+    const Merkle = TestMerkle;
 
     // Index 5 = 0b101
     // Level 0: bit 0 = 1 (right)
@@ -432,7 +435,7 @@ test "proof direction bits" {
 
 test "empty tree returns zero root" {
     var hasher = Blake3Hasher.init();
-    const Merkle = MerkleTree(M31, Blake3Hasher);
+    const Merkle = TestMerkle;
 
     const evals: []const M31 = &.{};
     var scratch: [0]Merkle.Digest = undefined;
@@ -443,7 +446,7 @@ test "empty tree returns zero root" {
 
 test "two leaf tree" {
     var hasher = Blake3Hasher.init();
-    const Merkle = MerkleTree(M31, Blake3Hasher);
+    const Merkle = TestMerkle;
 
     const evals = [_]M31{ M31.fromU64(1), M31.fromU64(2) };
     var scratch: [2]Merkle.Digest = undefined;
@@ -459,7 +462,7 @@ test "two leaf tree" {
 
 test "commit root matches open tree root" {
     var hasher = Blake3Hasher.init();
-    const Merkle = MerkleTree(M31, Blake3Hasher);
+    const Merkle = TestMerkle;
 
     const evals = [_]M31{ M31.fromU64(1), M31.fromU64(2), M31.fromU64(3), M31.fromU64(4) };
 
@@ -476,7 +479,7 @@ test "commit root matches open tree root" {
 
 test "last leaf index" {
     var hasher = Blake3Hasher.init();
-    const Merkle = MerkleTree(M31, Blake3Hasher);
+    const Merkle = TestMerkle;
 
     const N = 16;
     var evals: [N]M31 = undefined;
@@ -494,7 +497,7 @@ test "last leaf index" {
 
 test "hasher reuse across multiple trees" {
     var hasher = Blake3Hasher.init();
-    const Merkle = MerkleTree(M31, Blake3Hasher);
+    const Merkle = TestMerkle;
 
     // First tree
     const evals1 = [_]M31{ M31.fromU64(1), M31.fromU64(2) };
