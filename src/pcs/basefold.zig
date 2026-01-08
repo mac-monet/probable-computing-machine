@@ -86,11 +86,11 @@ pub fn Basefold(comptime F: type, comptime config: Config) type {
             return Merkle.commit(evals, scratch, &hasher);
         }
 
-        /// Prove that f(r) = claimed_value.
+        /// Open polynomial at point r, proving f(r) = claimed_value.
         ///
         /// Allocator used for scratch space only - proof is fully bounded.
         /// Recommended: pass arena.allocator() for efficient batch allocation.
-        pub fn prove(
+        pub fn open(
             allocator: std.mem.Allocator,
             f_evals: []const F,
             r: []const F,
@@ -441,7 +441,7 @@ test "basefold prove and verify" {
     }
 
     // Prove
-    const proof = try BasefoldM31.prove(allocator, &f_evals, &r);
+    const proof = try BasefoldM31.open(allocator, &f_evals, &r);
 
     // Verify with fresh arena
     var verify_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -473,7 +473,7 @@ test "basefold rejects wrong claimed value" {
     }
 
     // Prove with correct value
-    const proof = try BasefoldM31.prove(allocator, &f_evals, &r);
+    const proof = try BasefoldM31.open(allocator, &f_evals, &r);
 
     // Verify with WRONG claimed value
     var verify_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -499,7 +499,7 @@ test "basefold commit matches prove commitment" {
     const standalone_commitment = BasefoldM31.commit(&f_evals);
 
     // Prove and check first commitment matches
-    const proof = try BasefoldM31.prove(arena.allocator(), &f_evals, &r);
+    const proof = try BasefoldM31.open(arena.allocator(), &f_evals, &r);
 
     try std.testing.expectEqualSlices(u8, &standalone_commitment, &proof.commitments[0]);
 }
@@ -533,7 +533,7 @@ test "basefold with larger polynomial" {
         claimed_value = claimed_value.add(f.mul(e));
     }
 
-    const proof = try BasefoldM31.prove(allocator, &f_evals, &r);
+    const proof = try BasefoldM31.open(allocator, &f_evals, &r);
 
     var verify_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer verify_arena.deinit();

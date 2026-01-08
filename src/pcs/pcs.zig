@@ -35,7 +35,7 @@ pub fn PCS(comptime F: type, comptime Impl: type) type {
             evals: []const F,
             point: []const F,
         ) !OpeningProof {
-            return Impl.prove(allocator, evals, point);
+            return Impl.open(allocator, evals, point);
         }
 
         /// Verify opening proof.

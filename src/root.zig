@@ -9,6 +9,8 @@ pub const Transcript = @import("core/transcript.zig").Transcript;
 pub const merkle = @import("merkle/root.zig");
 pub const constraint = @import("constraint/constraint.zig");
 pub const trace = @import("constraint/trace.zig");
+pub const prover = @import("prover.zig");
+pub const verifier = @import("verifier.zig");
 
 test {
     // Import modules to include their tests
@@ -30,4 +32,8 @@ test {
     _ = @import("constraint/constraint.zig");
     _ = @import("constraint/trace.zig");
     _ = @import("constraint/builder.zig");
+
+    // Prover & Verifier
+    _ = @import("prover.zig");
+    _ = @import("verifier.zig");
 }
